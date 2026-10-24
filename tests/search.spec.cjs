@@ -1,0 +1,102 @@
+const { chromium } = require('playwright');
+const assert = require('node:assert/strict');
+const path = require('node:path');
+const fs = require('node:fs');
+const http = require('node:http');
+const source = fs.readFileSync(path.join(__dirname,'..','k_content_scout_dashboard.html'));
+(async () => {
+ const server = http.createServer((req,res)=>{res.setHeader('Content-Type','text/html; charset=utf-8');res.end(source)});
+ await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+ const html = `http://127.0.0.1:${server.address().port}/`;
+ const browser = await chromium.launch({headless:true, ...(require('node:fs').existsSync('/usr/bin/chromium') ? {executablePath:'/usr/bin/chromium'} : {}), args:['--no-sandbox']});
+ let passed=0;
+ async function test(name, options, check) {
+  const page=await browser.newPage();const calls=[], errors=[];
+  page.on('pageerror', e=>errors.push(e.message));
+  await page.route('**/*',async route=>{
+   const u=new URL(route.request().url());
+   if(u.origin===new URL(html).origin) return route.continue();
+   if(u.hostname!=='www.googleapis.com') return route.abort();
+   calls.push(u);
+   const endpoint=u.pathname.split('/').pop();
+   if(options.error===endpoint) return route.fulfill({status:403,contentType:'application/json',body:JSON.stringify({error:{message:'Quota exceeded',errors:[{reason:'quotaExceeded'}]}})});
+   const videos=options.videos || [{id:'korean',title:'한국 음식 해외반응',views:1000}];
+   let data;
+   if(endpoint==='search') data={items:options.empty?[]:videos.map(v=>({id:{videoId:v.id}})),...(options.pages&&!u.searchParams.has('pageToken')?{nextPageToken:'NEXT'}:{})};
+   if(endpoint==='search' && options.paginateFixtures) {
+    const offset=Number(u.searchParams.get('pageToken')||0);
+    data={items:videos.slice(offset,offset+50).map(v=>({id:{videoId:v.id}})),...(offset+50<videos.length?{nextPageToken:String(offset+50)}:{})};
+   }
+   if(endpoint==='videos') data={items:videos.filter(v=>u.searchParams.get('id').split(',').includes(v.id)).map(v=>({id:v.id,snippet:{title:v.title,channelId:'ch',channelTitle:'한국 채널',publishedAt:new Date().toISOString(),defaultAudioLanguage:'ko'},statistics:{viewCount:String(v.views)}}))};
+   if(endpoint==='channels') data={items:options.missingChannel?[]:[{id:'ch',snippet:{country:'KR'},statistics:options.hidden?{hiddenSubscriberCount:true}:{subscriberCount:'100000'}}]};
+   await route.fulfill({contentType:'application/json',body:JSON.stringify(data)});
+  });
+  await page.goto(html);await page.waitForFunction(()=>document.getElementById('videoCardsContainer').children.length>0);
+  await page.fill('#apiKeyInput','test-placeholder');await page.fill('#searchQueryInput','한국 음식 해외반응');
+  try {await check(page,calls);assert.deepEqual(errors,[]);passed++;console.log('PASS',name);}
+  finally {await page.close();}
+ }
+ async function search(page){await page.click('#executeSearchBtn');await page.waitForFunction(()=>!document.getElementById('executeSearchBtn').disabled);}
+ await test('Korean/KR videos with low views remain visible and receive grade',{},async p=>{
+  await search(p);assert.equal(await p.evaluate(()=>state.filteredVideos.length),1);
+  assert.equal(await p.evaluate(()=>state.filteredVideos[0].country),'KR');
+  assert.equal(await p.evaluate(()=>state.filteredVideos[0].grade),'S');
+  assert.match(await p.locator('#videoCardsContainer').innerText(),/S 등급 · 1위/);
+ });
+ await test('Two search orders, pagination, no language exclusion, deduplication',{pages:true},async(p,calls)=>{
+  await search(p);const q=calls.filter(u=>u.pathname.endsWith('/search'));
+  assert.equal(q.length,4);assert.deepEqual([...new Set(q.map(u=>u.searchParams.get('order')))],['relevance','viewCount']);
+  assert.ok(q.every(u=>u.searchParams.get('q')==='한국 음식 해외반응'&&u.searchParams.get('maxResults')==='50'));
+  assert.equal(await p.evaluate(()=>state.allVideos.length),1);
+ });
+ for(const endpoint of ['search','videos','channels'])await test(endpoint+' errors are persistent, no false success',{error:endpoint},async p=>{
+  await search(p);assert.match(await p.locator('#searchStatus').innerText(),new RegExp('검색 실패: '+endpoint));
+  assert.match(await p.locator('#searchStatus').innerText(),/quotaExceeded/);
+  assert.equal(await p.evaluate(()=>state.allVideos.length),0);
+ });
+ await test('Empty result clears demo and subtitle studio',{empty:true},async p=>{
+  await search(p);assert.equal(await p.evaluate(()=>state.allVideos.length),0);
+  assert.equal(await p.evaluate(()=>state.selectedVideo),null);
+  assert.equal(await p.locator('#transcriptFullTextarea').inputValue(),'');
+  assert.match(await p.locator('#searchStatus').innerText(),/수집 후보 0개/);
+ });
+ for(const option of ['hidden','missingChannel']) await test(option+' subscriber counts stay unknown and visible',{[option]:true},async p=>{
+  await search(p);assert.equal(await p.evaluate(()=>state.filteredVideos[0].subscriberCount),null);
+  assert.equal(await p.evaluate(()=>state.filteredVideos[0].viralRatio),null);
+  assert.match(await p.locator('#videoCardsContainer').innerText(),/확인 불가/);
+ });
+ await test('New search resets bookmark tab and quick filter',{},async p=>{
+  await p.click('[data-tab="bookmarks"]');await p.fill('#quickTextFilterInput','no match');
+  await search(p);assert.equal(await p.evaluate(()=>state.currentTab),'all');assert.equal(await p.locator('#quickTextFilterInput').inputValue(),'');
+  assert.equal(await p.evaluate(()=>state.filteredVideos.length),1);
+ });
+ await test('S/A/B sorting prioritizes query relevance above unrelated popularity',{videos:[{id:'b',title:'Football championship',views:10000000},{id:'a',title:'한국 일상',views:5000},{id:'s',title:'한국 음식 해외반응',views:100}]},async p=>{
+  await search(p);assert.deepEqual(await p.evaluate(()=>state.filteredVideos.map(v=>v.grade)),['S','A','B']);
+  assert.deepEqual(await p.evaluate(()=>state.filteredVideos.map(v=>v.videoId)),['s','a','b']);
+  await p.fill('#minViewsInput','99999999');assert.equal(await p.evaluate(()=>state.filteredVideos.length),3);
+ });
+ await test('Page limit reports additional results',{pages:true},async(p,calls)=>{
+  await p.selectOption('#searchPagesSelect','1');await search(p);
+  assert.equal(calls.filter(u=>u.pathname.endsWith('/search')).length,2);
+  assert.match(await p.locator('#searchStatus').innerText(),/추가 결과/);
+ });
+ await test('No API key does not pretend to search demo',{},async p=>{
+  await p.fill('#apiKeyInput','');await search(p);assert.equal(await p.evaluate(()=>state.allVideos.length),0);
+  assert.match(await p.locator('#searchStatus').innerText(),/API 키를 입력/);
+ });
+ await test('Manual query is preserved when adding keyword chip',{},async p=>{
+  await p.fill('#searchQueryInput','내 검색 목적');
+  await p.locator('#keywordChipsContainer button').first().click();
+  assert.ok((await p.locator('#searchQueryInput').inputValue()).includes('내 검색 목적'));
+ });
+ await test('120 unique candidates survive real-sized pagination and 50-ID detail batches',{paginateFixtures:true,videos:Array.from({length:120},(_,i)=>({id:'v'+i,title:'한국 음식 해외반응 '+i,views:i}))},async(p,calls)=>{
+  await search(p);assert.equal(await p.evaluate(()=>state.filteredVideos.length),120);
+  assert.equal(calls.filter(u=>u.pathname.endsWith('/videos')).length,3);
+  assert.ok(calls.filter(u=>u.pathname.endsWith('/videos')).every(u=>u.searchParams.get('id').split(',').length<=50));
+ });
+ await test('More than 10 keywords is rejected explicitly without silent truncation',{},async(p,calls)=>{
+  await p.fill('#searchQueryInput',Array.from({length:11},(_,i)=>'keyword'+i).join('|'));await search(p);
+  assert.equal(calls.length,0);assert.match(await p.locator('#toastContainer').innerText(),/1~10개/);
+ });
+ await browser.close();server.close();console.log(`${passed} browser regression scenarios passed (mock YouTube API).`);
+})().catch(e=>{console.error(e);process.exit(1)});

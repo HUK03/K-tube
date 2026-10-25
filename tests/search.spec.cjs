@@ -28,6 +28,7 @@ const source = fs.readFileSync(path.join(__dirname,'..','k_content_scout_dashboa
    if(u.hostname!=='www.googleapis.com') return route.abort();
    calls.push(u);
    const endpoint=u.pathname.split('/').pop();
+   if(endpoint==='search' && options.quotaAtSearch && calls.filter(u=>u.pathname.endsWith('/search')).length>=options.quotaAtSearch) return route.fulfill({status:429,contentType:'application/json',body:JSON.stringify({error:{message: "Quota exceeded for Search Queries per day",errors:[{reason:'rateLimitExceeded'}]}})});
    if(options.error===endpoint) return route.fulfill({status:403,contentType:'application/json',body:JSON.stringify({error:{message:'Quota exceeded',errors:[{reason:'quotaExceeded'}]}})});
    const videos=options.videos || [{id:'korean',title:'한국 음식 해외반응',views:1000}];
    let data;
@@ -53,6 +54,7 @@ const source = fs.readFileSync(path.join(__dirname,'..','k_content_scout_dashboa
   assert.match(await p.locator('#videoCardsContainer').innerText(),/S 등급 · 1위/);
  });
  await test('Two search orders, pagination, no language exclusion, deduplication',{pages:true},async(p,calls)=>{
+  await p.selectOption('#searchOrdersSelect','both');await p.selectOption('#searchPagesSelect','3');
   await search(p);const q=calls.filter(u=>u.pathname.endsWith('/search'));
   assert.equal(q.length,4);assert.deepEqual([...new Set(q.map(u=>u.searchParams.get('order')))],['relevance','viewCount']);
   assert.ok(q.every(u=>u.searchParams.get('q')==='한국 음식 해외반응'&&u.searchParams.get('maxResults')==='50'));
@@ -86,7 +88,7 @@ const source = fs.readFileSync(path.join(__dirname,'..','k_content_scout_dashboa
  });
  await test('Page limit reports additional results',{pages:true},async(p,calls)=>{
   await p.selectOption('#searchPagesSelect','1');await search(p);
-  assert.equal(calls.filter(u=>u.pathname.endsWith('/search')).length,2);
+  assert.equal(calls.filter(u=>u.pathname.endsWith('/search')).length,1);
   assert.match(await p.locator('#searchStatus').innerText(),/추가 결과/);
  });
  await test('No API key does not pretend to search demo',{},async p=>{
@@ -99,6 +101,7 @@ const source = fs.readFileSync(path.join(__dirname,'..','k_content_scout_dashboa
   assert.ok((await p.locator('#searchQueryInput').inputValue()).includes('내 검색 목적'));
  });
  await test('120 unique candidates survive real-sized pagination and 50-ID detail batches',{paginateFixtures:true,videos:Array.from({length:120},(_,i)=>({id:'v'+i,title:'한국 음식 해외반응 '+i,views:i}))},async(p,calls)=>{
+  await p.selectOption('#searchPagesSelect','3');
   await search(p);assert.equal(await p.evaluate(()=>state.filteredVideos.length),120);
   assert.equal(calls.filter(u=>u.pathname.endsWith('/videos')).length,3);
   assert.ok(calls.filter(u=>u.pathname.endsWith('/videos')).every(u=>u.searchParams.get('id').split(',').length<=50));
@@ -128,5 +131,46 @@ const source = fs.readFileSync(path.join(__dirname,'..','k_content_scout_dashboa
    assert.equal(await p.locator('.download-btn').isEnabled(),true);
   });
  }
+ await test('Default three-keyword search uses at most three search requests',{pages:true},async(p,calls)=>{
+  await p.fill('#searchQueryInput','한국 해외반응 | Korea reaction | Korean food reaction');
+  assert.match(await p.locator('#searchBudgetStatus').innerText(),/최대 3회/);
+  await search(p);assert.equal(calls.filter(u=>u.pathname.endsWith('/search')).length,3);
+ });
+ await test('Identical queries reuse cache, including after page reload',{},async(p,calls)=>{
+  await search(p);const count=calls.length;
+  await search(p);assert.equal(calls.length,count);
+  assert.match(await p.locator('#searchStatus').innerText(),/추가 API 요청 없음/);
+  await p.reload();await p.fill('#searchQueryInput','한국 음식 해외반응');
+  await search(p);assert.equal(calls.length,count);
+  assert.equal(await p.evaluate(()=>state.filteredVideos.length),1);
+ });
+ await test('Force refresh explicitly bypasses cache',{},async(p,calls)=>{
+  await search(p);const count=calls.length;
+  await p.check('#forceRefreshCheckbox');await search(p);assert.ok(calls.length>count);
+ });
+ await test('Expired cache triggers fresh requests',{},async(p,calls)=>{
+  await search(p);const count=calls.length;
+  await p.evaluate(()=>{state.lastSuccessfulSearch.savedAt-=3600001;localStorage.setItem('kscout_search_cache_v1',JSON.stringify(state.lastSuccessfulSearch));});
+  await search(p);assert.ok(calls.length>count);
+ });
+ await test('Daily 429 is actionable and never automatically retried',{quotaAtSearch:1},async(p,calls)=>{
+  await search(p);assert.equal(calls.filter(u=>u.pathname.endsWith('/search')).length,1);
+  assert.match(await p.locator('#searchStatus').innerText(),/하루 검색 한도/);
+  assert.match(await p.locator('#searchStatus').innerText(),/한도 갱신 또는 증액/);
+ });
+ await test('Quota failure preserves previous successful query and ranking',{quotaAtSearch:2},async p=>{
+  await search(p);const videos=await p.evaluate(()=>state.filteredVideos.map(v=>[v.videoId,v.grade]));
+  await p.fill('#searchQueryInput','different query');await search(p);
+  assert.deepEqual(await p.evaluate(()=>state.filteredVideos.map(v=>[v.videoId,v.grade])),videos);
+  assert.match(await p.locator('#searchStatus').innerText(),/이전 성공 결과를 유지/);
+  assert.equal(await p.evaluate(()=>state.rankingQueries[0]),'한국 음식 해외반응');
+ });
+ await test('Page quota failure displays collected candidates with partial-result notice',{quotaAtSearch:2,pages:true},async(p,calls)=>{
+  await p.selectOption('#searchPagesSelect','3');await search(p);
+  assert.equal(calls.filter(u=>u.pathname.endsWith('/search')).length,2);
+  assert.equal(await p.evaluate(()=>state.filteredVideos.length),1);
+  assert.match(await p.locator('#searchStatus').innerText(),/일부 결과만 표시/);
+  assert.match(await p.locator('#searchStatus').innerText(),/rateLimitExceeded/);
+ });
  await browser.close();server.close();console.log(`${passed} browser regression scenarios passed (mock YouTube API).`);
 })().catch(e=>{console.error(e);process.exit(1)});

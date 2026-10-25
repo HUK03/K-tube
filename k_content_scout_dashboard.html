@@ -218,11 +218,18 @@
     <section class="glass-card rounded-xl p-4 text-xs space-y-2" aria-label="검색 상태">
       <label for="searchPagesSelect">키워드별 조회 범위:</label>
       <select id="searchPagesSelect" class="bg-slate-900 rounded p-2">
-        <option value="1">최대 100개 (관련도·조회수 각 1페이지)</option>
-        <option value="3" selected>최대 300개 (관련도·조회수 각 3페이지)</option>
-        <option value="5">최대 500개 (관련도·조회수 각 5페이지)</option>
+        <option value="1" selected>50개씩 · 1페이지 (기본)</option>
+        <option value="3">150개씩 · 3페이지</option>
+        <option value="5">250개씩 · 5페이지</option>
       </select>
-      <p>키워드 최대 10개 · 관련도순과 조회수순을 함께 수집하고 중복을 제거합니다. 등급이 낮아도 전부 표시합니다. 기간·조회 범위 변경 후 다시 검색하세요. 추가 조회는 API 할당량을 사용합니다.</p>
+      <label for="searchOrdersSelect">수집 방식:</label>
+      <select id="searchOrdersSelect" class="bg-slate-900 rounded p-2">
+        <option value="relevance" selected>관련도순 (절약 모드)</option>
+        <option value="both">관련도순 + 조회수순 (확장 모드)</option>
+      </select>
+      <label><input id="forceRefreshCheckbox" type="checkbox" /> 캐시 대신 새로 조회 (할당량 사용)</label>
+      <p id="searchBudgetStatus"></p>
+      <p>동일 조건은 1시간 동안 이 브라우저의 저장 결과를 재사용합니다. 확장 모드는 요청 수가 2배입니다. 후보는 중복 제거 후 모두 표시합니다.</p>
       <p>S: 관련성이 높은 추천 후보 · A: 관련 후보 · B: 그 외 검토 후보. 제목·설명 관련성 75점 + 조회수 10점 + 배수 10점 + 최신성 5점. 영상 내용 검증은 직접 확인하세요.</p>
       <p id="searchStatus" role="status" aria-live="polite">샘플 데이터 표시 중 · 발굴 버튼으로 실제 영상을 검색하세요.</p>
       <p id="downloadStatus" role="status" aria-live="polite">영상 다운로드: Python 서버 실행 필요 · 최대 250MB · MP4 우선</p>
@@ -611,6 +618,7 @@ python server.py</pre>
       apiKey: '',
       downloadBusy: false,
       searchSummary: null,
+      lastSuccessfulSearch: null,
       rankingQueries: ['한국 해외반응', 'Korea reaction', 'Korean food reaction'],
       localServerOnline: false,
       localServerUrl: 'http://127.0.0.1:5000',
@@ -790,6 +798,7 @@ python server.py</pre>
     function syncSearchInputWithSelectedKeywords() {
       const input = document.getElementById('searchQueryInput');
       input.value = Array.from(state.selectedKeywords).join(' | ');
+      updateSearchBudget();
     }
 
     // =========================================================================
@@ -1419,6 +1428,28 @@ python server.py</pre>
       document.getElementById('transcriptSourceLabel').textContent = '추출 상태: 대기 중';
     }
 
+    function updateSearchBudget() {
+      const queries = new Set(document.getElementById('searchQueryInput').value.split(/[|,]/).map(q => q.trim()).filter(Boolean));
+      const pages = Number(document.getElementById('searchPagesSelect').value) || 1;
+      const orders = document.getElementById('searchOrdersSelect').value === 'both' ? 2 : 1;
+      document.getElementById('searchBudgetStatus').textContent = `새 조회 시 검색 요청 최대 ${queries.size * pages * orders}회 · 상세·채널 조회 별도. 일일 검색 한도가 소진되면 범위를 줄여도 즉시 복구되지 않습니다.`;
+    }
+
+    function loadSearchCache() {
+      try {
+        const cache = JSON.parse(localStorage.getItem('kscout_search_cache_v1'));
+        if (cache && Array.isArray(cache.videos) && Array.isArray(cache.queries) && typeof cache.message === 'string'
+            && Number.isFinite(cache.savedAt) && cache.savedAt <= Date.now() && Date.now() - cache.savedAt < 3600000) return cache;
+      } catch {}
+      return null;
+    }
+
+    function rememberSearch(cacheKey) {
+      const cache = { cacheKey, savedAt: Date.now(), videos: state.allVideos, queries: [...state.rankingQueries], message: state.searchSummary.message };
+      state.lastSuccessfulSearch = cache;
+      try { localStorage.setItem('kscout_search_cache_v1', JSON.stringify(cache)); } catch {}
+    }
+
     async function requestYouTube(endpoint, params, apiKey) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 20000);
@@ -1431,13 +1462,16 @@ python server.py</pre>
         if (!response.ok || data.error) {
           const reason = data.error?.errors?.[0]?.reason || data.error?.status || 'unknown';
           const hints = {
-            quotaExceeded: 'YouTube API 할당량을 확인하거나 조회 페이지 수를 줄이세요.',
+            quotaExceeded: '프로젝트의 API 할당량을 소진했습니다. 한도 갱신 또는 증액 후 다시 시도하세요.',
+            rateLimitExceeded: /per day|daily/i.test(data.error?.message || '') ? '프로젝트의 하루 검색 한도를 소진했습니다. 한도 갱신 또는 증액이 필요합니다. 같은 프로젝트의 키를 바꿔도 한도는 공유됩니다.' : '검색 요청 한도를 초과했습니다. 콘솔에서 제한 종류를 확인한 후 다시 시도하세요.',
             dailyLimitExceeded: 'YouTube API 일일 할당량을 확인하세요.',
             keyInvalid: 'API 키가 유효한지 확인하세요.',
             accessNotConfigured: '프로젝트에서 YouTube Data API v3를 활성화하세요.',
             ipRefererBlocked: 'API 키의 웹사이트 제한과 현재 접속 주소를 확인하세요.'
           };
-          throw new Error(`${endpoint}: HTTP ${response.status} / ${reason} — ${data.error?.message || '요청 실패'} ${hints[reason] || ''}`);
+          const error = new Error(`${endpoint}: HTTP ${response.status} / ${reason} — ${data.error?.message || '요청 실패'} ${hints[reason] || ''}`);
+          error.isQuota = ['quotaExceeded', 'dailyLimitExceeded', 'rateLimitExceeded'].includes(reason);
+          throw error;
         }
         if (!Array.isArray(data.items)) throw new Error(`${endpoint}: 응답에 items 목록이 없습니다.`);
         return data;
@@ -1459,17 +1493,28 @@ python server.py</pre>
         showToast('키워드는 1~10개 입력하세요. 여러 키워드는 | 또는 쉼표로 구분합니다.', 'warn');
         return;
       }
+      const previous = state.lastSuccessfulSearch || loadSearchCache();
       state.rankingQueries = queries;
       resetResultView();
       clearSearchResults();
+      const maxDays = Number(document.getElementById('daysFilterSelect').value || 30);
+      const pageLimit = Math.min(5, Math.max(1, Number(document.getElementById('searchPagesSelect').value) || 1));
+      const orders = document.getElementById('searchOrdersSelect').value === 'both' ? ['relevance', 'viewCount'] : ['relevance'];
+      const cacheKey = JSON.stringify({ queries, maxDays, pageLimit, orders });
+      const cache = loadSearchCache() || state.lastSuccessfulSearch;
+      if (!document.getElementById('forceRefreshCheckbox').checked && cache?.cacheKey === cacheKey && Date.now() - cache.savedAt < 3600000) {
+        state.allVideos = cache.videos;
+        state.lastSuccessfulSearch = cache;
+        state.searchSummary = { message: `저장 결과 재사용 (추가 API 요청 없음): ${cache.message}` };
+        applyFiltersAndRender();
+        return;
+      }
       if (!apiKey) {
         state.searchSummary = { message: '검색하지 않음: API 키를 입력하세요. 샘플은 샘플 복원 버튼에서 볼 수 있습니다.' };
         applyFiltersAndRender();
         showToast('실제 검색에는 YouTube Data API 키가 필요합니다.', 'warn');
         return;
       }
-      const maxDays = Number(document.getElementById('daysFilterSelect').value || 30);
-      const pageLimit = Math.min(5, Math.max(1, Number(document.getElementById('searchPagesSelect').value) || 3));
       const publishedAfter = new Date(Date.now() - maxDays * 86400000).toISOString();
       state.searchSummary = { message: '검색 중' };
       applyFiltersAndRender();
@@ -1479,13 +1524,20 @@ python server.py</pre>
       try {
         const videoIdToKeyword = new Map();
         let limited = false;
-        for (const q of queries) {
-          for (const order of ['relevance', 'viewCount']) {
+        let quotaWarning = '';
+        searchLoop: for (const q of queries) {
+          for (const order of orders) {
             let pageToken = '';
             for (let page = 0; page < pageLimit; page++) {
               const params = { part: 'snippet', type: 'video', order, maxResults: '50', publishedAfter, q };
               if (pageToken) params.pageToken = pageToken;
-              const data = await requestYouTube('search', params, apiKey);
+              let data;
+              try { data = await requestYouTube('search', params, apiKey); }
+              catch (error) {
+                if (!error.isQuota || !videoIdToKeyword.size) throw error;
+                quotaWarning = String(error.message).split(apiKey).join('[API 키]');
+                break searchLoop;
+              }
               for (const item of data.items) {
                 const id = item.id?.videoId;
                 if (id && !videoIdToKeyword.has(id)) videoIdToKeyword.set(id, q);
@@ -1528,14 +1580,19 @@ python server.py</pre>
             thumbnail: v.snippet?.thumbnails?.high?.url || v.snippet?.thumbnails?.medium?.url || `https://i.ytimg.com/vi/${v.id}/hqdefault.jpg`
           };
         });
-        state.searchSummary = { message: `검색 완료: 최근 ${maxDays}일 · 한글/국내 채널 포함${limited ? ' · 추가 결과가 있습니다. 조회 범위를 늘려 다시 검색하세요.' : ''}${ids.length > videoDetails.length ? ` · 상세 조회 불가 ${ids.length - videoDetails.length}개` : ''}` };
+        state.searchSummary = { message: `${quotaWarning ? '일부 결과만 표시 · ' + quotaWarning : '검색 완료'}: 최근 ${maxDays}일 · 한글/국내 채널 포함${limited ? ' · 추가 결과가 있습니다. 조회 범위를 늘려 다시 검색하세요.' : ''}${ids.length > videoDetails.length ? ` · 상세 조회 불가 ${ids.length - videoDetails.length}개` : ''}` };
+        rememberSearch(cacheKey);
         applyFiltersAndRender();
-        showToast(`수집 후보 ${state.allVideos.length}개 / 현재 표시 ${state.filteredVideos.length}개`, state.filteredVideos.length ? 'success' : 'warn');
+        showToast(`수집 후보 ${state.allVideos.length}개 / 현재 표시 ${state.filteredVideos.length}개`, state.filteredVideos.length && !quotaWarning ? 'success' : 'warn');
       } catch (error) {
         clearSearchResults();
         // Do not expose the API key if an upstream error echoes it.
         const message = String(error.message).split(apiKey).join('[API 키]');
-        state.searchSummary = { message: `검색 실패: ${message}` };
+        if (previous) {
+          state.allVideos = previous.videos;
+          state.rankingQueries = previous.queries;
+        }
+        state.searchSummary = { message: `검색 실패: ${message}${previous ? ' · 새 검색 결과가 아닙니다. 이전 성공 결과를 유지합니다: ' + previous.queries.join(' | ') : ''}` };
         applyFiltersAndRender();
         showToast(`검색 실패: ${message}`, 'error');
       } finally {
@@ -1624,10 +1681,17 @@ python server.py</pre>
         renderKeywordChips();
       });
 
+      ['searchQueryInput', 'searchPagesSelect', 'searchOrdersSelect'].forEach(id => {
+        document.getElementById(id).addEventListener('input', updateSearchBudget);
+        document.getElementById(id).addEventListener('change', updateSearchBudget);
+      });
+      updateSearchBudget();
+
       // 검색어 초기화
       document.getElementById('clearQueryBtn').addEventListener('click', () => {
         state.selectedKeywords.clear();
         document.getElementById('searchQueryInput').value = '';
+        updateSearchBudget();
         renderKeywordChips();
       });
 

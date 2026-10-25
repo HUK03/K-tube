@@ -216,20 +216,11 @@
     </section>
 
     <section class="glass-card rounded-xl p-4 text-xs space-y-2" aria-label="검색 상태">
-      <label for="searchPagesSelect">키워드별 조회 범위:</label>
-      <select id="searchPagesSelect" class="bg-slate-900 rounded p-2">
-        <option value="1" selected>50개씩 · 1페이지 (기본)</option>
-        <option value="3">150개씩 · 3페이지</option>
-        <option value="5">250개씩 · 5페이지</option>
-      </select>
-      <label for="searchOrdersSelect">수집 방식:</label>
-      <select id="searchOrdersSelect" class="bg-slate-900 rounded p-2">
-        <option value="relevance" selected>관련도순 (절약 모드)</option>
-        <option value="both">관련도순 + 조회수순 (확장 모드)</option>
-      </select>
+      <span>검색어 통합 · 관련도순 후보 최대 50개씩 수집</span>
+      <button id="loadMoreSearchBtn" type="button" disabled class="rounded bg-indigo-600 px-3 py-2 disabled:opacity-50">추가 50개 검색</button>
       <label><input id="forceRefreshCheckbox" type="checkbox" /> 캐시 대신 새로 조회 (할당량 사용)</label>
       <p id="searchBudgetStatus"></p>
-      <p>동일 조건은 1시간 동안 이 브라우저의 저장 결과를 재사용합니다. 확장 모드는 요청 수가 2배입니다. 후보는 중복 제거 후 모두 표시합니다.</p>
+      <p>한 번에 검색 요청 1회만 보냅니다. 추가 버튼을 누를 때만 다음 페이지를 조회합니다. 같은 조건은 1시간 동안 저장 결과를 재사용하며, 수집한 후보 안에서 S·A·B 순으로 정렬합니다.</p>
       <p>S: 관련성이 높은 추천 후보 · A: 관련 후보 · B: 그 외 검토 후보. 제목·설명 관련성 75점 + 조회수 10점 + 배수 10점 + 최신성 5점. 영상 내용 검증은 직접 확인하세요.</p>
       <p id="searchStatus" role="status" aria-live="polite">샘플 데이터 표시 중 · 발굴 버튼으로 실제 영상을 검색하세요.</p>
       <p id="downloadStatus" role="status" aria-live="polite">영상 다운로드: Python 서버 실행 필요 · 최대 250MB · MP4 우선</p>
@@ -619,6 +610,7 @@ python server.py</pre>
       downloadBusy: false,
       searchSummary: null,
       lastSuccessfulSearch: null,
+      pagination: null,
       rankingQueries: ['한국 해외반응', 'Korea reaction', 'Korean food reaction'],
       localServerOnline: false,
       localServerUrl: 'http://127.0.0.1:5000',
@@ -1415,6 +1407,7 @@ python server.py</pre>
     }
 
     function clearSearchResults() {
+      state.pagination = null;
       state.allVideos = [];
       state.filteredVideos = [];
       state.selectedVideo = null;
@@ -1428,26 +1421,34 @@ python server.py</pre>
       document.getElementById('transcriptSourceLabel').textContent = '추출 상태: 대기 중';
     }
 
+    function currentSearchCriteria() {
+      const queries = [...new Set(document.getElementById('searchQueryInput').value.split(/[|,]/).map(q => q.trim()).filter(Boolean))];
+      const maxDays = Number(document.getElementById('daysFilterSelect').value || 30);
+      return { queries, maxDays, cacheKey: JSON.stringify({ queries, maxDays, order: 'relevance', pageSize: 50 }) };
+    }
+
     function updateSearchBudget() {
-      const queries = new Set(document.getElementById('searchQueryInput').value.split(/[|,]/).map(q => q.trim()).filter(Boolean));
-      const pages = Number(document.getElementById('searchPagesSelect').value) || 1;
-      const orders = document.getElementById('searchOrdersSelect').value === 'both' ? 2 : 1;
-      document.getElementById('searchBudgetStatus').textContent = `새 조회 시 검색 요청 최대 ${queries.size * pages * orders}회 · 상세·채널 조회 별도. 일일 검색 한도가 소진되면 범위를 줄여도 즉시 복구되지 않습니다.`;
+      const criteria = currentSearchCriteria();
+      const matching = state.pagination?.cacheKey === criteria.cacheKey;
+      document.getElementById('searchBudgetStatus').textContent = '새 검색·추가 검색은 각각 검색 요청 1회 (최대 50개) · 상세·채널 조회 별도. 일일 한도 소진 시 갱신 또는 증액이 필요합니다.'
+        + (state.pagination && !matching ? ' 검색어·기간이 변경되었습니다. 발굴 버튼으로 새 검색을 실행하세요.' : '');
+      document.getElementById('loadMoreSearchBtn').disabled = document.getElementById('executeSearchBtn').disabled || !matching || !state.pagination?.nextPageToken;
     }
 
     function loadSearchCache() {
       try {
-        const cache = JSON.parse(localStorage.getItem('kscout_search_cache_v1'));
+        const cache = JSON.parse(localStorage.getItem('kscout_search_cache_v2'));
         if (cache && Array.isArray(cache.videos) && Array.isArray(cache.queries) && typeof cache.message === 'string'
+            && cache.pagination && typeof cache.pagination.cacheKey === 'string' && typeof cache.pagination.publishedAfter === 'string'
             && Number.isFinite(cache.savedAt) && cache.savedAt <= Date.now() && Date.now() - cache.savedAt < 3600000) return cache;
       } catch {}
       return null;
     }
 
     function rememberSearch(cacheKey) {
-      const cache = { cacheKey, savedAt: Date.now(), videos: state.allVideos, queries: [...state.rankingQueries], message: state.searchSummary.message };
+      const cache = { cacheKey, pagination: { ...state.pagination }, savedAt: Date.now(), videos: state.allVideos, queries: [...state.rankingQueries], message: state.searchSummary.message };
       state.lastSuccessfulSearch = cache;
-      try { localStorage.setItem('kscout_search_cache_v1', JSON.stringify(cache)); } catch {}
+      try { localStorage.setItem('kscout_search_cache_v2', JSON.stringify(cache)); } catch {}
     }
 
     async function requestYouTube(endpoint, params, apiKey) {
@@ -1485,70 +1486,59 @@ python server.py</pre>
     }
 
     async function executeYouTubeApiDiscovery() {
+      return fetchDiscoveryPage(false);
+    }
+
+    async function fetchDiscoveryPage(append) {
       const btn = document.getElementById('executeSearchBtn');
       if (btn.disabled) return;
       const apiKey = (document.getElementById('apiKeyInput').value || state.apiKey || '').trim();
-      const queries = [...new Set(document.getElementById('searchQueryInput').value.split(/[|,]/).map(q => q.trim()).filter(Boolean))];
+      const { queries, maxDays, cacheKey } = currentSearchCriteria();
       if (!queries.length || queries.length > 10) {
         showToast('키워드는 1~10개 입력하세요. 여러 키워드는 | 또는 쉼표로 구분합니다.', 'warn');
         return;
       }
+      if (append && (state.pagination?.cacheKey !== cacheKey || !state.pagination?.nextPageToken)) return;
       const previous = state.lastSuccessfulSearch || loadSearchCache();
-      state.rankingQueries = queries;
-      resetResultView();
-      clearSearchResults();
-      const maxDays = Number(document.getElementById('daysFilterSelect').value || 30);
-      const pageLimit = Math.min(5, Math.max(1, Number(document.getElementById('searchPagesSelect').value) || 1));
-      const orders = document.getElementById('searchOrdersSelect').value === 'both' ? ['relevance', 'viewCount'] : ['relevance'];
-      const cacheKey = JSON.stringify({ queries, maxDays, pageLimit, orders });
-      const cache = loadSearchCache() || state.lastSuccessfulSearch;
-      if (!document.getElementById('forceRefreshCheckbox').checked && cache?.cacheKey === cacheKey && Date.now() - cache.savedAt < 3600000) {
-        state.allVideos = cache.videos;
-        state.lastSuccessfulSearch = cache;
-        state.searchSummary = { message: `저장 결과 재사용 (추가 API 요청 없음): ${cache.message}` };
-        applyFiltersAndRender();
-        return;
+      const startingVideos = append ? [...state.allVideos] : [];
+      const pageToken = append ? state.pagination.nextPageToken : '';
+      const publishedAfter = append ? state.pagination.publishedAfter : new Date(Date.now() - maxDays * 86400000).toISOString();
+      if (!append) {
+        state.rankingQueries = queries;
+        resetResultView();
+        clearSearchResults();
+        const cache = loadSearchCache() || state.lastSuccessfulSearch;
+        if (!document.getElementById('forceRefreshCheckbox').checked && cache?.cacheKey === cacheKey && Date.now() - cache.savedAt < 3600000) {
+          state.allVideos = cache.videos;
+          state.pagination = { ...cache.pagination };
+          state.lastSuccessfulSearch = cache;
+          state.searchSummary = { message: `저장 결과 재사용 (추가 API 요청 없음): ${cache.message}` };
+          applyFiltersAndRender();
+          updateSearchBudget();
+          return;
+        }
       }
       if (!apiKey) {
         state.searchSummary = { message: '검색하지 않음: API 키를 입력하세요. 샘플은 샘플 복원 버튼에서 볼 수 있습니다.' };
         applyFiltersAndRender();
+        updateSearchBudget();
         showToast('실제 검색에는 YouTube Data API 키가 필요합니다.', 'warn');
         return;
       }
-      const publishedAfter = new Date(Date.now() - maxDays * 86400000).toISOString();
-      state.searchSummary = { message: '검색 중' };
+      state.searchSummary = { message: append ? '추가 50개 검색 중 · 기존 결과 유지' : '검색 중' };
       applyFiltersAndRender();
       btn.disabled = true;
+      updateSearchBudget();
       const originalBtnHtml = btn.innerHTML;
       btn.textContent = 'YouTube API 검색 중...';
       try {
-        const videoIdToKeyword = new Map();
-        let limited = false;
-        let quotaWarning = '';
-        searchLoop: for (const q of queries) {
-          for (const order of orders) {
-            let pageToken = '';
-            for (let page = 0; page < pageLimit; page++) {
-              const params = { part: 'snippet', type: 'video', order, maxResults: '50', publishedAfter, q };
-              if (pageToken) params.pageToken = pageToken;
-              let data;
-              try { data = await requestYouTube('search', params, apiKey); }
-              catch (error) {
-                if (!error.isQuota || !videoIdToKeyword.size) throw error;
-                quotaWarning = String(error.message).split(apiKey).join('[API 키]');
-                break searchLoop;
-              }
-              for (const item of data.items) {
-                const id = item.id?.videoId;
-                if (id && !videoIdToKeyword.has(id)) videoIdToKeyword.set(id, q);
-              }
-              pageToken = data.nextPageToken || '';
-              if (!pageToken) break;
-              if (page === pageLimit - 1) limited = true;
-            }
-          }
-        }
-        const ids = [...videoIdToKeyword.keys()];
+        // YouTube's OR operator combines keywords into one search request.
+        const combinedQuery = queries.join(' | ');
+        const params = { part: 'snippet', type: 'video', order: 'relevance', maxResults: '50', publishedAfter, q: combinedQuery };
+        if (pageToken) params.pageToken = pageToken;
+        const page = await requestYouTube('search', params, apiKey);
+        const existingIds = new Set(startingVideos.map(v => v.videoId));
+        const ids = [...new Set(page.items.slice(0, 50).map(item => item.id?.videoId).filter(id => id && !existingIds.has(id)))];
         const videoDetails = [];
         for (let i = 0; i < ids.length; i += 50) {
           const data = await requestYouTube('videos', { part: 'snippet,statistics', id: ids.slice(i, i + 50).join(',') }, apiKey);
@@ -1567,7 +1557,7 @@ python server.py</pre>
             });
           }
         }
-        state.allVideos = videoDetails.map(v => {
+        const discovered = videoDetails.map(v => {
           const channel = channelMap.get(v.snippet?.channelId);
           return {
             videoId: v.id, title: v.snippet?.title || '', description: v.snippet?.description || '',
@@ -1576,14 +1566,17 @@ python server.py</pre>
             language: v.snippet?.defaultAudioLanguage || v.snippet?.defaultLanguage || 'en',
             publishedAt: v.snippet?.publishedAt || '', viewCount: Number(v.statistics?.viewCount || 0),
             likeCount: Number(v.statistics?.likeCount || 0), commentCount: Number(v.statistics?.commentCount || 0),
-            matchedKeyword: videoIdToKeyword.get(v.id) || '',
+            matchedKeyword: combinedQuery,
             thumbnail: v.snippet?.thumbnails?.high?.url || v.snippet?.thumbnails?.medium?.url || `https://i.ytimg.com/vi/${v.id}/hqdefault.jpg`
           };
         });
-        state.searchSummary = { message: `${quotaWarning ? '일부 결과만 표시 · ' + quotaWarning : '검색 완료'}: 최근 ${maxDays}일 · 한글/국내 채널 포함${limited ? ' · 추가 결과가 있습니다. 조회 범위를 늘려 다시 검색하세요.' : ''}${ids.length > videoDetails.length ? ` · 상세 조회 불가 ${ids.length - videoDetails.length}개` : ''}` };
+        state.allVideos = [...startingVideos, ...discovered];
+        const nextPageToken = typeof page.nextPageToken === 'string' && page.nextPageToken !== pageToken ? page.nextPageToken : '';
+        state.pagination = { cacheKey, publishedAfter, nextPageToken };
+        state.searchSummary = { message: `${append ? '추가 검색 완료' : '검색 완료'}: 최근 ${maxDays}일 · 이번에 ${discovered.length}개 추가 · 한글/국내 채널 포함${nextPageToken ? ' · 추가 결과가 있습니다. 추가 50개 검색 버튼으로 조회하세요.' : ' · 다음 페이지 없음'}${ids.length > videoDetails.length ? ` · 상세 조회 불가 ${ids.length - videoDetails.length}개` : ''}` };
         rememberSearch(cacheKey);
         applyFiltersAndRender();
-        showToast(`수집 후보 ${state.allVideos.length}개 / 현재 표시 ${state.filteredVideos.length}개`, state.filteredVideos.length && !quotaWarning ? 'success' : 'warn');
+        showToast(`수집 후보 ${state.allVideos.length}개 / 현재 표시 ${state.filteredVideos.length}개`, state.filteredVideos.length ? 'success' : 'warn');
       } catch (error) {
         clearSearchResults();
         // Do not expose the API key if an upstream error echoes it.
@@ -1591,6 +1584,7 @@ python server.py</pre>
         if (previous) {
           state.allVideos = previous.videos;
           state.rankingQueries = previous.queries;
+          state.pagination = { ...previous.pagination };
         }
         state.searchSummary = { message: `검색 실패: ${message}${previous ? ' · 새 검색 결과가 아닙니다. 이전 성공 결과를 유지합니다: ' + previous.queries.join(' | ') : ''}` };
         applyFiltersAndRender();
@@ -1598,6 +1592,7 @@ python server.py</pre>
       } finally {
         btn.disabled = false;
         btn.innerHTML = originalBtnHtml;
+        updateSearchBudget();
       }
     }
 
@@ -1681,7 +1676,7 @@ python server.py</pre>
         renderKeywordChips();
       });
 
-      ['searchQueryInput', 'searchPagesSelect', 'searchOrdersSelect'].forEach(id => {
+      ['searchQueryInput', 'daysFilterSelect'].forEach(id => {
         document.getElementById(id).addEventListener('input', updateSearchBudget);
         document.getElementById(id).addEventListener('change', updateSearchBudget);
       });
@@ -1773,10 +1768,12 @@ python server.py</pre>
 
       // 메인 발굴 실행 & 샘플 복원 & CSV 다운로드
       document.getElementById('executeSearchBtn').addEventListener('click', executeYouTubeApiDiscovery);
+      document.getElementById('loadMoreSearchBtn').addEventListener('click', () => fetchDiscoveryPage(true));
       document.getElementById('loadDemoDataBtn').addEventListener('click', () => {
         state.searchSummary = null;
         clearSearchResults();
         state.allVideos = [...BUILTIN_VIRAL_VIDEOS];
+        updateSearchBudget();
         applyFiltersAndRender();
         showToast('실전 해외 바이럴 샘플 데이터셋을 불러왔습니다.', 'success');
       });

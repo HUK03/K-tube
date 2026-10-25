@@ -29,6 +29,7 @@ const source = fs.readFileSync(path.join(__dirname,'..','k_content_scout_dashboa
    calls.push(u);
    const endpoint=u.pathname.split('/').pop();
    if(endpoint==='search' && options.quotaAtSearch && calls.filter(u=>u.pathname.endsWith('/search')).length>=options.quotaAtSearch) return route.fulfill({status:429,contentType:'application/json',body:JSON.stringify({error:{message: "Quota exceeded for Search Queries per day",errors:[{reason:'rateLimitExceeded'}]}})});
+   if(endpoint==='videos' && options.failVideosAt && calls.filter(u=>u.pathname.endsWith('/videos')).length>=options.failVideosAt) return route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:{message:'Temporary detail error'}})});
    if(options.error===endpoint) return route.fulfill({status:403,contentType:'application/json',body:JSON.stringify({error:{message:'Quota exceeded',errors:[{reason:'quotaExceeded'}]}})});
    const videos=options.videos || [{id:'korean',title:'한국 음식 해외반응',views:1000}];
    let data;
@@ -46,6 +47,7 @@ const source = fs.readFileSync(path.join(__dirname,'..','k_content_scout_dashboa
   try {await check(page,calls);assert.deepEqual(errors,[]);passed++;console.log('PASS',name);}
   finally {await page.close();}
  }
+ async function more(page){await page.click('#loadMoreSearchBtn');await page.waitForFunction(()=>!document.getElementById('executeSearchBtn').disabled);}
  async function search(page){await page.click('#executeSearchBtn');await page.waitForFunction(()=>!document.getElementById('executeSearchBtn').disabled);}
  await test('Korean/KR videos with low views remain visible and receive grade',{},async p=>{
   await search(p);assert.equal(await p.evaluate(()=>state.filteredVideos.length),1);
@@ -53,12 +55,15 @@ const source = fs.readFileSync(path.join(__dirname,'..','k_content_scout_dashboa
   assert.equal(await p.evaluate(()=>state.filteredVideos[0].grade),'S');
   assert.match(await p.locator('#videoCardsContainer').innerText(),/S 등급 · 1위/);
  });
- await test('Two search orders, pagination, no language exclusion, deduplication',{pages:true},async(p,calls)=>{
-  await p.selectOption('#searchOrdersSelect','both');await p.selectOption('#searchPagesSelect','3');
-  await search(p);const q=calls.filter(u=>u.pathname.endsWith('/search'));
-  assert.equal(q.length,4);assert.deepEqual([...new Set(q.map(u=>u.searchParams.get('order')))],['relevance','viewCount']);
-  assert.ok(q.every(u=>u.searchParams.get('q')==='한국 음식 해외반응'&&u.searchParams.get('maxResults')==='50'));
+ await test('One request per click, pagination and deduplication',{pages:true},async(p,calls)=>{
+  await search(p);assert.equal(calls.filter(u=>u.pathname.endsWith('/search')).length,1);
+  assert.equal(await p.locator('#loadMoreSearchBtn').isEnabled(),true);
+  await more(p);const q=calls.filter(u=>u.pathname.endsWith('/search'));
+  assert.equal(q.length,2);assert.equal(q[1].searchParams.get('pageToken'),'NEXT');
+  assert.equal(q[0].searchParams.get('publishedAfter'),q[1].searchParams.get('publishedAfter'));
+  assert.ok(q.every(u=>u.searchParams.get('q')==='한국 음식 해외반응'&&u.searchParams.get('maxResults')==='50'&&u.searchParams.get('order')==='relevance'));
   assert.equal(await p.evaluate(()=>state.allVideos.length),1);
+  assert.equal(await p.locator('#loadMoreSearchBtn').isEnabled(),false);
  });
  for(const endpoint of ['search','videos','channels'])await test(endpoint+' errors are persistent, no false success',{error:endpoint},async p=>{
   await search(p);assert.match(await p.locator('#searchStatus').innerText(),new RegExp('검색 실패: '+endpoint));
@@ -87,7 +92,7 @@ const source = fs.readFileSync(path.join(__dirname,'..','k_content_scout_dashboa
   await p.fill('#minViewsInput','99999999');assert.equal(await p.evaluate(()=>state.filteredVideos.length),3);
  });
  await test('Page limit reports additional results',{pages:true},async(p,calls)=>{
-  await p.selectOption('#searchPagesSelect','1');await search(p);
+  await search(p);
   assert.equal(calls.filter(u=>u.pathname.endsWith('/search')).length,1);
   assert.match(await p.locator('#searchStatus').innerText(),/추가 결과/);
  });
@@ -101,8 +106,10 @@ const source = fs.readFileSync(path.join(__dirname,'..','k_content_scout_dashboa
   assert.ok((await p.locator('#searchQueryInput').inputValue()).includes('내 검색 목적'));
  });
  await test('120 unique candidates survive real-sized pagination and 50-ID detail batches',{paginateFixtures:true,videos:Array.from({length:120},(_,i)=>({id:'v'+i,title:'한국 음식 해외반응 '+i,views:i}))},async(p,calls)=>{
-  await p.selectOption('#searchPagesSelect','3');
-  await search(p);assert.equal(await p.evaluate(()=>state.filteredVideos.length),120);
+  await search(p);assert.equal(await p.evaluate(()=>state.filteredVideos.length),50);
+  await more(p);assert.equal(await p.evaluate(()=>state.filteredVideos.length),100);
+  await more(p);assert.equal(await p.evaluate(()=>state.filteredVideos.length),120);
+  assert.equal(await p.locator('#loadMoreSearchBtn').isEnabled(),false);
   assert.equal(calls.filter(u=>u.pathname.endsWith('/videos')).length,3);
   assert.ok(calls.filter(u=>u.pathname.endsWith('/videos')).every(u=>u.searchParams.get('id').split(',').length<=50));
  });
@@ -131,10 +138,11 @@ const source = fs.readFileSync(path.join(__dirname,'..','k_content_scout_dashboa
    assert.equal(await p.locator('.download-btn').isEnabled(),true);
   });
  }
- await test('Default three-keyword search uses at most three search requests',{pages:true},async(p,calls)=>{
+ await test('Three keywords are combined into a single search request',{pages:true},async(p,calls)=>{
   await p.fill('#searchQueryInput','한국 해외반응 | Korea reaction | Korean food reaction');
-  assert.match(await p.locator('#searchBudgetStatus').innerText(),/최대 3회/);
-  await search(p);assert.equal(calls.filter(u=>u.pathname.endsWith('/search')).length,3);
+  assert.match(await p.locator('#searchBudgetStatus').innerText(),/검색 요청 1회/);
+  await search(p);const searches=calls.filter(u=>u.pathname.endsWith('/search'));assert.equal(searches.length,1);
+  assert.equal(searches[0].searchParams.get('q'),'한국 해외반응 | Korea reaction | Korean food reaction');
  });
  await test('Identical queries reuse cache, including after page reload',{},async(p,calls)=>{
   await search(p);const count=calls.length;
@@ -150,7 +158,7 @@ const source = fs.readFileSync(path.join(__dirname,'..','k_content_scout_dashboa
  });
  await test('Expired cache triggers fresh requests',{},async(p,calls)=>{
   await search(p);const count=calls.length;
-  await p.evaluate(()=>{state.lastSuccessfulSearch.savedAt-=3600001;localStorage.setItem('kscout_search_cache_v1',JSON.stringify(state.lastSuccessfulSearch));});
+  await p.evaluate(()=>{state.lastSuccessfulSearch.savedAt-=3600001;localStorage.setItem('kscout_search_cache_v2',JSON.stringify(state.lastSuccessfulSearch));});
   await search(p);assert.ok(calls.length>count);
  });
  await test('Daily 429 is actionable and never automatically retried',{quotaAtSearch:1},async(p,calls)=>{
@@ -165,12 +173,38 @@ const source = fs.readFileSync(path.join(__dirname,'..','k_content_scout_dashboa
   assert.match(await p.locator('#searchStatus').innerText(),/이전 성공 결과를 유지/);
   assert.equal(await p.evaluate(()=>state.rankingQueries[0]),'한국 음식 해외반응');
  });
- await test('Page quota failure displays collected candidates with partial-result notice',{quotaAtSearch:2,pages:true},async(p,calls)=>{
-  await p.selectOption('#searchPagesSelect','3');await search(p);
+ await test('Additional-page quota failure preserves candidates and the retry cursor',{quotaAtSearch:2,pages:true},async(p,calls)=>{
+  await search(p);await more(p);
   assert.equal(calls.filter(u=>u.pathname.endsWith('/search')).length,2);
   assert.equal(await p.evaluate(()=>state.filteredVideos.length),1);
-  assert.match(await p.locator('#searchStatus').innerText(),/일부 결과만 표시/);
+  assert.equal(await p.evaluate(()=>state.pagination.nextPageToken),'NEXT');
+  assert.match(await p.locator('#searchStatus').innerText(),/이전 성공 결과를 유지/);
   assert.match(await p.locator('#searchStatus').innerText(),/rateLimitExceeded/);
+ });
+ await test('Cached first page can continue after reload',{paginateFixtures:true,videos:Array.from({length:75},(_,i)=>({id:'c'+i,title:'한국 음식 해외반응',views:i}))},async(p,calls)=>{
+  await search(p);assert.equal(await p.evaluate(()=>state.allVideos.length),50);
+  await p.reload();await p.fill('#apiKeyInput','test-placeholder');await p.fill('#searchQueryInput','한국 음식 해외반응');
+  await search(p);assert.equal(calls.filter(u=>u.pathname.endsWith('/search')).length,1);
+  await more(p);assert.equal(await p.evaluate(()=>state.allVideos.length),75);
+  assert.equal(calls.filter(u=>u.pathname.endsWith('/search')).length,2);
+ });
+ await test('Changed query or period disables stale pagination',{pages:true},async(p,calls)=>{
+  await search(p);await p.fill('#searchQueryInput','different query');
+  assert.equal(await p.locator('#loadMoreSearchBtn').isEnabled(),false);
+  await p.evaluate(()=>fetchDiscoveryPage(true));assert.equal(calls.filter(u=>u.pathname.endsWith('/search')).length,1);
+  await p.fill('#searchQueryInput','한국 음식 해외반응');assert.equal(await p.locator('#loadMoreSearchBtn').isEnabled(),true);
+  await p.selectOption('#daysFilterSelect','90');assert.equal(await p.locator('#loadMoreSearchBtn').isEnabled(),false);
+ });
+ await test('Additional detail failure preserves previous data and cursor',{failVideosAt:2,paginateFixtures:true,videos:Array.from({length:60},(_,i)=>({id:'d'+i,title:'한국 음식 해외반응',views:i}))},async p=>{
+  await search(p);await more(p);
+  assert.equal(await p.evaluate(()=>state.allVideos.length),50);
+  assert.equal(await p.evaluate(()=>state.pagination.nextPageToken),'50');
+  assert.match(await p.locator('#searchStatus').innerText(),/Temporary detail error/);
+ });
+ await test('Concurrent load-more requests cannot consume the same page twice',{paginateFixtures:true,videos:Array.from({length:70},(_,i)=>({id:'e'+i,title:'한국 음식 해외반응',views:i}))},async(p,calls)=>{
+  await search(p);await p.evaluate(()=>Promise.all([fetchDiscoveryPage(true),fetchDiscoveryPage(true)]));
+  assert.equal(calls.filter(u=>u.pathname.endsWith('/search')).length,2);
+  assert.equal(await p.evaluate(()=>state.allVideos.length),70);
  });
  await browser.close();server.close();console.log(`${passed} browser regression scenarios passed (mock YouTube API).`);
 })().catch(e=>{console.error(e);process.exit(1)});

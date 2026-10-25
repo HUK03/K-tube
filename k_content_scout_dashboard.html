@@ -225,6 +225,7 @@
       <p>키워드 최대 10개 · 관련도순과 조회수순을 함께 수집하고 중복을 제거합니다. 등급이 낮아도 전부 표시합니다. 기간·조회 범위 변경 후 다시 검색하세요. 추가 조회는 API 할당량을 사용합니다.</p>
       <p>S: 관련성이 높은 추천 후보 · A: 관련 후보 · B: 그 외 검토 후보. 제목·설명 관련성 75점 + 조회수 10점 + 배수 10점 + 최신성 5점. 영상 내용 검증은 직접 확인하세요.</p>
       <p id="searchStatus" role="status" aria-live="polite">샘플 데이터 표시 중 · 발굴 버튼으로 실제 영상을 검색하세요.</p>
+      <p id="downloadStatus" role="status" aria-live="polite">영상 다운로드: Python 서버 실행 필요 · 최대 250MB · MP4 우선</p>
     </section>
 
     <!-- KPI Summary & Analytics Row -->
@@ -608,6 +609,7 @@ python server.py</pre>
     // =========================================================================
     const state = {
       apiKey: '',
+      downloadBusy: false,
       searchSummary: null,
       rankingQueries: ['한국 해외반응', 'Korea reaction', 'Korean food reaction'],
       localServerOnline: false,
@@ -946,6 +948,9 @@ python server.py</pre>
                   <button type="button" class="extract-btn px-3 py-1 rounded-lg text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white transition">
                     자막 추출 & 리뷰 대본 →
                   </button>
+                  <button type="button" class="download-btn px-3 py-1 rounded-lg text-xs font-bold bg-emerald-700 hover:bg-emerald-600 text-white disabled:opacity-50 transition" ${state.downloadBusy ? 'disabled' : ''}>
+                    영상 다운로드 ↓
+                  </button>
                 </div>
               </div>
             </div>
@@ -955,6 +960,7 @@ python server.py</pre>
         card.querySelector('.select-video-trigger').addEventListener('click', () => selectVideoForStudio(video));
         card.querySelector('.extract-btn').addEventListener('click', () => selectVideoForStudio(video, true));
         card.querySelector('.bookmark-btn').addEventListener('click', () => toggleBookmark(video.videoId));
+        card.querySelector('.download-btn').addEventListener('click', () => downloadVideo(video));
 
         container.appendChild(card);
       });
@@ -972,6 +978,64 @@ python server.py</pre>
         localStorage.setItem('kscout_bookmarks', JSON.stringify(Array.from(state.bookmarkedIds)));
       } catch (e) {}
       applyFiltersAndRender();
+    }
+
+    async function downloadVideo(video) {
+      if (state.downloadBusy) return;
+      const status = document.getElementById('downloadStatus');
+      if (video.channelId?.startsWith('UC_demo_')) {
+        status.textContent = '샘플 영상은 다운로드할 수 없습니다. 실제 검색 결과에서 선택하세요.';
+        showToast(status.textContent, 'warn');
+        return;
+      }
+      state.downloadBusy = true;
+      document.querySelectorAll('.download-btn').forEach(button => { button.disabled = true; });
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 195000);
+      try {
+        status.textContent = '다운로드 서버 연결 확인 중...';
+        let health;
+        try {
+          const response = await fetch(`${state.localServerUrl}/api/health`, { signal: AbortSignal.timeout(3000) });
+          health = response.ok ? await response.json() : null;
+        } catch {
+          throw new Error('Python 서버에 연결할 수 없습니다. 앱 폴더에서 python server.py를 실행한 후 다시 눌러주세요.');
+        }
+        if (!health?.video_download) throw new Error('다운로드 기능이 없는 서버입니다. 최신 server.py로 교체하고 서버를 재시작하세요.');
+        status.textContent = `영상 준비 중: ${video.title} (최대 3분). ${health.ffmpeg ? '' : 'FFmpeg가 없어 영상·음성 통합 형식을 사용합니다.'}`;
+        const response = await fetch(`${state.localServerUrl}/api/download`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ videoId: video.videoId }), signal: controller.signal
+        });
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({}));
+          throw new Error(error.error || `다운로드 요청 실패 (HTTP ${response.status})`);
+        }
+        if (!/^(video\/|application\/octet-stream)/i.test(response.headers.get('Content-Type') || '')) {
+          throw new Error('서버가 영상 파일을 반환하지 않았습니다. 최신 server.py로 재시작하세요.');
+        }
+        const blob = await response.blob();
+        if (!blob.size) throw new Error('받은 영상 파일이 비어 있습니다.');
+        const disposition = response.headers.get('Content-Disposition') || '';
+        const filename = disposition.match(/filename="?([A-Za-z0-9_.-]+)/i)?.[1] || `youtube-${video.videoId}.mp4`;
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+        status.textContent = `브라우저에 저장 요청을 보냈습니다: ${filename} (${(blob.size / 1048576).toFixed(1)}MB). 다운로드 목록을 확인하세요.`;
+        showToast('영상 파일 저장을 시작했습니다.', 'success');
+      } catch (error) {
+        status.textContent = `다운로드 실패: ${error.name === 'AbortError' ? '요청 시간이 초과되었습니다. 잠시 후 다시 시도하세요.' : error.message}`;
+        showToast(status.textContent, 'error');
+      } finally {
+        clearTimeout(timer);
+        state.downloadBusy = false;
+        document.querySelectorAll('.download-btn').forEach(button => { button.disabled = false; });
+      }
     }
 
     // =========================================================================

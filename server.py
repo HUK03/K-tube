@@ -17,11 +17,21 @@ Global K-Content Scout - Local Subtitle Extraction & Proxy Server
 
 import os
 import re
-from flask import Flask, request, jsonify, send_from_directory
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+from pathlib import Path
+from flask import Flask, request, jsonify, send_from_directory, send_file
 from flask_cors import CORS
 
 app = Flask(__name__, static_folder='.')
-CORS(app)
+CORS(app, expose_headers=['Content-Disposition'])
+
+DOWNLOAD_LIMIT = 250 * 1024 * 1024
+DOWNLOAD_TIMEOUT = 180
+download_slot = threading.BoundedSemaphore(1)
 
 def format_timestamp(seconds: float) -> str:
     hrs = int(seconds // 3600)
@@ -56,7 +66,63 @@ def index():
 
 @app.route('/api/health', methods=['GET'])
 def health():
-    return jsonify({"status": "ok", "service": "k-content-scout-transcript-server", "port": 5000})
+    return jsonify({"status": "ok", "service": "k-content-scout-transcript-server", "port": 5000,
+                    "video_download": True, "ffmpeg": bool(shutil.which('ffmpeg'))})
+
+
+@app.route('/api/download', methods=['POST'])
+def download_video():
+    payload = request.get_json(silent=True)
+    video_id = payload.get('videoId') if isinstance(payload, dict) else None
+    if not isinstance(video_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{11}', video_id):
+        return jsonify(status='error', error='올바른 YouTube 영상 ID가 필요합니다.'), 400
+    if not download_slot.acquire(blocking=False):
+        return jsonify(status='error', error='다른 영상을 준비 중입니다. 완료 후 다시 시도하세요.'), 409
+
+    temporary = None
+    handed_off = False
+    try:
+        temporary = tempfile.TemporaryDirectory(prefix='k-scout-video-')
+        output = Path(temporary.name) / 'video.%(ext)s'
+        # Without FFmpeg, choose an existing combined audio/video stream.
+        video_format = ('bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b'
+                        if shutil.which('ffmpeg') else 'b[ext=mp4]/b')
+        command = [sys.executable, '-m', 'yt_dlp', '--ignore-config', '--no-playlist',
+                   '--no-progress', '--no-warnings', '--socket-timeout', '15', '--retries', '1',
+                   '--fragment-retries', '1', '--max-filesize', str(DOWNLOAD_LIMIT),
+                   '--format', video_format, '--merge-output-format', 'mp4',
+                   '--match-filter', '!is_live', '--output', str(output),
+                   '--', f'https://www.youtube.com/watch?v={video_id}']
+        result = subprocess.run(command, capture_output=True, text=True,
+                                encoding='utf-8', errors='replace', timeout=DOWNLOAD_TIMEOUT)
+        if result.returncode:
+            detail = (result.stderr or result.stdout or 'YouTube 응답 오류').strip()[-1200:]
+            return jsonify(status='error', error=f'영상 다운로드 실패: {detail}'), 502
+
+        candidates = [p for p in Path(temporary.name).iterdir()
+                      if p.is_file() and p.name in ('video.mp4', 'video.webm', 'video.mkv', 'video.3gp', 'video.flv')]
+        if len(candidates) != 1 or candidates[0].stat().st_size == 0:
+            return jsonify(status='error', error='저장 가능한 영상이 없습니다. 라이브 방송, 용량 제한 또는 지원 형식을 확인하세요.'), 422
+        path = candidates[0]
+        if path.stat().st_size > DOWNLOAD_LIMIT:
+            return jsonify(status='error', error='영상 용량이 250MB를 초과했습니다.'), 413
+        response = send_file(path, as_attachment=True, download_name=f'youtube-{video_id}{path.suffix}',
+                             conditional=False, max_age=0)
+        response.headers['Cache-Control'] = 'no-store'
+        # Keep the temporary file until the WSGI server finishes streaming it,
+        # then close the file before cleanup (including on Windows).
+        response.direct_passthrough = False
+        response.call_on_close(temporary.cleanup)
+        handed_off = True
+        return response
+    except subprocess.TimeoutExpired:
+        return jsonify(status='error', error='영상 준비 시간이 3분을 초과했습니다. 더 짧은 영상으로 다시 시도하세요.'), 504
+    except OSError:
+        return jsonify(status='error', error='파일을 저장하거나 다운로드 도구를 실행하지 못했습니다. 디스크 공간과 Python 설치를 확인하세요.'), 500
+    finally:
+        if temporary is not None and not handed_off:
+            temporary.cleanup()
+        download_slot.release()
 
 @app.route('/api/transcript', methods=['GET'])
 def get_transcript():

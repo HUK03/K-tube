@@ -16,6 +16,15 @@ const source = fs.readFileSync(path.join(__dirname,'..','k_content_scout_dashboa
   await page.route('**/*',async route=>{
    const u=new URL(route.request().url());
    if(u.origin===new URL(html).origin) return route.continue();
+   if(u.hostname==='127.0.0.1' && u.port==='5000' && options.downloadServer) {
+    if(u.pathname==='/api/health') return route.fulfill({contentType:'application/json',body:JSON.stringify({status:'ok',video_download:options.downloadServer!=='old',ffmpeg:true})});
+    if(u.pathname==='/api/download') {
+     calls.push(u);
+     assert.deepEqual(route.request().postDataJSON(),{videoId:'abc123def45'});
+     if(options.downloadServer==='error') return route.fulfill({status:502,contentType:'application/json',body:JSON.stringify({error:'Video unavailable'})});
+     return route.fulfill({contentType:'video/mp4',headers:{'Content-Disposition':'attachment; filename=youtube-abc123def45.mp4','Access-Control-Expose-Headers':'Content-Disposition'},body:Buffer.from('test video bytes')});
+    }
+   }
    if(u.hostname!=='www.googleapis.com') return route.abort();
    calls.push(u);
    const endpoint=u.pathname.split('/').pop();
@@ -98,5 +107,26 @@ const source = fs.readFileSync(path.join(__dirname,'..','k_content_scout_dashboa
   await p.fill('#searchQueryInput',Array.from({length:11},(_,i)=>'keyword'+i).join('|'));await search(p);
   assert.equal(calls.length,0);assert.match(await p.locator('#toastContainer').innerText(),/1~10개/);
  });
+ await test('Download button saves returned file with server filename',{downloadServer:'ok',videos:[{id:'abc123def45',title:'한국 음식 해외반응',views:100}]},async p=>{
+  await search(p);
+  const downloaded=p.waitForEvent('download');
+  await p.locator('.download-btn').click();
+  const file=await downloaded;assert.equal(file.suggestedFilename(),'youtube-abc123def45.mp4');
+  assert.equal(fs.readFileSync(await file.path(),'utf8'),'test video bytes');
+  await p.waitForFunction(()=>state.downloadBusy===false);
+  assert.match(await p.locator('#downloadStatus').innerText(),/저장 요청/);
+ });
+ await test('Sample downloads explain that real search is required',{},async p=>{
+  await p.locator('.download-btn').first().click();
+  assert.match(await p.locator('#downloadStatus').innerText(),/샘플 영상은 다운로드할 수 없습니다/);
+ });
+ for(const [kind,message] of [['old',/최신 server.py/],['offline',/python server.py/],['error',/Video unavailable/]]) {
+  await test('Download '+kind+' has a persistent error and restores buttons',{downloadServer:kind==='offline'?null:kind,videos:[{id:'abc123def45',title:'한국 음식 해외반응',views:100}]},async p=>{
+   await search(p);await p.locator('.download-btn').click();
+   await p.waitForFunction(()=>state.downloadBusy===false);
+   assert.match(await p.locator('#downloadStatus').innerText(),message);
+   assert.equal(await p.locator('.download-btn').isEnabled(),true);
+  });
+ }
  await browser.close();server.close();console.log(`${passed} browser regression scenarios passed (mock YouTube API).`);
 })().catch(e=>{console.error(e);process.exit(1)});

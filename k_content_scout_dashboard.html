@@ -226,6 +226,16 @@
       <p id="downloadStatus" role="status" aria-live="polite">영상 다운로드: Python 서버 실행 필요 · 최대 250MB · MP4 우선</p>
     </section>
 
+    <section class="glass-card rounded-xl p-4 space-y-2" aria-label="영상 주소로 자막 추출">
+      <label for="directVideoUrlInput" class="text-sm font-bold">원본 영상 주소로 자막 추출</label>
+      <div class="flex flex-col sm:flex-row gap-2">
+        <input id="directVideoUrlInput" type="text" placeholder="YouTube 영상 주소 붙여넣기 (watch · youtu.be · Shorts)" class="flex-1 rounded-lg bg-slate-900 border border-slate-700 p-2 text-sm" />
+        <button id="extractDirectUrlBtn" type="button" class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-bold disabled:opacity-50">주소로 자막 추출</button>
+      </div>
+      <p class="text-xs text-slate-400">검색 결과에 없는 영상도 사용할 수 있습니다. API 키·검색 한도는 사용하지 않습니다. Python 서버 실행이 필요합니다. 추출 언어는 자막 작업창에서 선택하세요.</p>
+      <p id="directVideoStatus" role="status" aria-live="polite" class="text-xs text-slate-300">원본 주소를 입력하면 해당 영상의 자막 작업창이 열립니다.</p>
+    </section>
+
     <!-- KPI Summary & Analytics Row -->
     <section class="grid grid-cols-1 lg:grid-cols-12 gap-6">
       <!-- 4 KPI Cards + Quick Sort Controls -->
@@ -623,6 +633,8 @@ python server.py</pre>
       selectedVideo: null,
       currentStudioTab: 'segments',
       currentTranscriptSegments: [],
+      transcriptRequestId: 0,
+      currentTranscriptLanguage: '',
       viralChart: null
     };
 
@@ -845,7 +857,7 @@ python server.py</pre>
       renderVideoCards(filtered);
       renderViralChart(filtered);
 
-      if (filtered.length > 0 && (!state.selectedVideo || !filtered.some(v => v.videoId === state.selectedVideo.videoId))) {
+      if (filtered.length > 0 && (!state.selectedVideo || (!state.selectedVideo.directInput && !filtered.some(v => v.videoId === state.selectedVideo.videoId)))) {
         selectVideoForStudio(filtered[0]);
       }
     }
@@ -1108,12 +1120,49 @@ python server.py</pre>
     // =========================================================================
     // 9. 자막 추출 엔진 (로컬 서버 + 멀티 클라우드 프록시 + 내장 자막)
     // =========================================================================
+    function parseYouTubeVideoId(value) {
+      const text = value.trim();
+      const validId = /^[A-Za-z0-9_-]{11}$/;
+      if (validId.test(text)) return text;
+      try {
+        const url = new URL(/^[a-z][a-z0-9+.-]*:/i.test(text) ? text : `https://${text}`);
+        if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.port) return null;
+        const host = url.hostname.toLowerCase();
+        let id = null;
+        if (['youtu.be', 'www.youtu.be'].includes(host)) {
+          id = url.pathname.match(/^\/([A-Za-z0-9_-]{11})\/?$/)?.[1];
+        } else if (['youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com'].includes(host)) {
+          id = url.pathname === '/watch' ? url.searchParams.get('v') : url.pathname.match(/^\/(?:shorts|embed|live)\/([A-Za-z0-9_-]{11})\/?$/)?.[1];
+        } else if (['youtube-nocookie.com', 'www.youtube-nocookie.com'].includes(host)) {
+          id = url.pathname.match(/^\/embed\/([A-Za-z0-9_-]{11})\/?$/)?.[1];
+        }
+        return validId.test(id || '') ? id : null;
+      } catch { return null; }
+    }
+
+    async function extractDirectVideoUrl() {
+      const id = parseYouTubeVideoId(document.getElementById('directVideoUrlInput').value);
+      const status = document.getElementById('directVideoStatus');
+      if (!id) {
+        status.textContent = '올바른 YouTube 영상 주소를 입력하세요. 채널·재생목록 주소만으로는 추출할 수 없습니다.';
+        showToast(status.textContent, 'warn');
+        return;
+      }
+      const button = document.getElementById('extractDirectUrlBtn');
+      button.disabled = true;
+      status.textContent = `입력한 영상 ${id}의 자막을 확인하고 있습니다...`;
+      const video = { videoId: id, directInput: true, title: `주소로 연 영상 · ${id}`, language: '',
+        channelTitle: '정보 미조회', subscriberCount: null, viewCount: null, viralRatio: null };
+      try { await selectVideoForStudio(video, true); }
+      finally { button.disabled = false; }
+    }
+
     async function selectVideoForStudio(video, notify = false) {
       state.selectedVideo = video;
       renderVideoCards(state.filteredVideos);
 
       document.getElementById('studioVideoTitle').textContent = video.title;
-      document.getElementById('studioChannelMeta').textContent =
+      document.getElementById('studioChannelMeta').textContent = video.directInput ? '주소로 직접 연 영상 · 제목·채널·통계 미조회 · 검색 API 사용 없음' :
         `${video.channelTitle} (${video.country || '글로벌'}) · 조회수 ${formatNumber(video.viewCount)}회 · 구독자 대비 ${formatRatio(video.viralRatio)}배`;
       document.getElementById('studioYoutubeLink').href = `https://www.youtube.com/watch?v=${video.videoId}`;
 
@@ -1125,29 +1174,59 @@ python server.py</pre>
     }
 
     async function extractSubtitlesForVideo(video, notify = false) {
-      const isCurrent = () => state.selectedVideo === video;
+      const requestId = ++state.transcriptRequestId;
+      const isCurrent = () => state.selectedVideo === video && requestId === state.transcriptRequestId;
       if (!isCurrent()) return;
       const lang = document.getElementById('subtitleLangSelect').value || 'en';
       const sourceLabel = document.getElementById('transcriptSourceLabel');
       const listEl = document.getElementById('transcriptSegmentsList');
-      listEl.innerHTML = `<div class="text-slate-400 py-6 text-center">해외 영상 자막 트랙을 추출하는 중입니다...</div>`;
+      state.currentTranscriptSegments = [];
+      state.currentTranscriptLanguage = '';
+      document.getElementById('transcriptFullTextarea').value = '';
+      document.getElementById('reviewPromptTextarea').value = '';
+      document.getElementById('transcriptSearchInput').value = '';
+      sourceLabel.textContent = '추출 상태: 확인 중';
+      listEl.textContent = '영상 자막 트랙을 추출하는 중입니다...';
+      let extractionError = '';
+      const failDirect = message => {
+        if (!isCurrent()) return;
+        sourceLabel.textContent = '자막 추출 실패';
+        listEl.textContent = message;
+        document.getElementById('directVideoStatus').textContent = message;
+        if (notify) showToast(message, 'error');
+      };
+      if (video.directInput) {
+        const online = await checkLocalSubtitleServer(true);
+        if (!isCurrent()) return;
+        if (!online) {
+          failDirect('Python 서버에 연결할 수 없습니다. 앱 폴더에서 python server.py를 실행하고 다시 추출하세요.');
+          return;
+        }
+      }
 
       // 1순위: 로컬 Python 자막 서버(localhost:5000)가 켜져 있을 경우 호출
       if (state.localServerOnline) {
         try {
-          const res = await fetch(`${state.localServerUrl}/api/transcript?videoId=${encodeURIComponent(video.videoId)}&lang=${encodeURIComponent(lang)}`);
+          const res = await fetch(`${state.localServerUrl}/api/transcript?videoId=${encodeURIComponent(video.videoId)}&lang=${encodeURIComponent(lang)}`, { signal: AbortSignal.timeout(60000) });
           const data = await res.json();
           if (!isCurrent()) return;
           if (res.ok && data.status === 'ok' && Array.isArray(data.segments) && data.segments.length > 0) {
             state.currentTranscriptSegments = data.segments;
+            state.currentTranscriptLanguage = data.language_code || lang;
+            if (video.directInput) document.getElementById('directVideoStatus').textContent = `추출 완료: ${video.videoId} · ${data.language || lang} · ${data.segments.length}개 구간`;
             sourceLabel.textContent = `추출 완료: 로컬 서버 (${data.language} · ${data.segments.length}개 구간)`;
             updateStudioViews(video, data.segments);
             if (notify) showToast('로컬 자막 서버에서 전체 자막을 추출했습니다!', 'success');
             return;
           }
+          extractionError = data.error || '공개된 자막을 찾지 못했습니다.';
         } catch (err) {
-          // 폴백 진행
+          extractionError = err.name === 'TimeoutError' ? '자막 응답 시간이 초과되었습니다. 잠시 후 다시 시도하세요.' : '자막 서버 응답을 받지 못했습니다. 서버 실행 상태를 확인하세요.';
         }
+      }
+      if (video.directInput) {
+        failDirect(`자막 추출 실패: ${extractionError || '공개된 자막이 없습니다.'}`);
+        return;
       }
 
       // 2순위: 공개 Invidious Captions API / TimedText 클라우드 추출 시도
@@ -1176,6 +1255,7 @@ python server.py</pre>
                 const parsed = parseWebVttToSegments(vttText);
                 if (parsed.length > 0) {
                   state.currentTranscriptSegments = parsed;
+                  state.currentTranscriptLanguage = targetTrack.language_code || lang;
                   sourceLabel.textContent = `추출 완료: 클라우드 자막 API (${targetTrack.label || lang} · ${parsed.length}개 구간)`;
                   updateStudioViews(video, parsed);
                   if (notify) showToast('클라우드 자막 프록시에서 실시간 자막을 추출했습니다!', 'success');
@@ -1193,6 +1273,7 @@ python server.py</pre>
       // 3순위: 영상 내장 검증 자막 또는 설명글 기반 핵심 스크립트 폴백
       if (Array.isArray(video.transcript) && video.transcript.length > 0) {
         state.currentTranscriptSegments = video.transcript;
+        state.currentTranscriptLanguage = video.language || lang;
         sourceLabel.textContent = `추출 완료: 영상 원문 자막 트랙 (${video.transcript.length}개 구간)`;
         updateStudioViews(video, video.transcript);
         if (notify) showToast('영상 자막 및 한국어 리뷰 대본 생성이 완료되었습니다!', 'success');
@@ -1280,6 +1361,16 @@ python server.py</pre>
       const fullText = segments.map(s => `[${s.time}] ${s.text}`).join('\n');
       document.getElementById('transcriptFullTextarea').value = fullText;
 
+      if (video.directInput) {
+        document.getElementById('reviewPromptTextarea').value = [
+          '# 원본 영상 자막 기반 한국어 리뷰 대본',
+          `원본 링크: https://www.youtube.com/watch?v=${video.videoId}`,
+          '제목·채널·조회수·구독자 수는 조회하지 않았습니다. 해당 정보와 발언자의 국적을 추정하지 마세요.',
+          '아래 실제 추출 자막에 근거해 핵심 내용, 근거 타임스탬프, 한국어 리뷰 대본을 작성하세요.',
+          '', fullText
+        ].join('\n');
+        return;
+      }
       const reviewPrompt = [
         `# 한국인 타겟 '해외 반응/리뷰 채널' 쇼츠 & 롱폼 대본 생성 프롬프트`,
         ``,
@@ -1303,6 +1394,10 @@ python server.py</pre>
       document.getElementById('reviewPromptTextarea').value = reviewPrompt;
     }
 
+    function escapeHtml(text) {
+      return String(text ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
+    }
+
     function renderSegmentsList(segments) {
       const query = (document.getElementById('transcriptSearchInput').value || '').trim().toLowerCase();
       const listEl = document.getElementById('transcriptSegmentsList');
@@ -1324,9 +1419,9 @@ python server.py</pre>
         const jumpSec = Math.floor(Number(seg.start || 0));
         row.innerHTML = `
           <a href="https://www.youtube.com/watch?v=${videoId}&t=${jumpSec}s" target="_blank" rel="noopener noreferrer" class="px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-mono text-[11px] font-bold shrink-0 hover:bg-indigo-500 hover:text-white transition" title="해당 시간대의 유튜브 영상으로 이동">
-            ${seg.time}
+            ${escapeHtml(seg.time)}
           </a>
-          <p class="text-slate-200 leading-relaxed flex-1 select-all">${seg.text}</p>
+          <p class="text-slate-200 leading-relaxed flex-1 select-all">${escapeHtml(seg.text)}</p>
         `;
         listEl.appendChild(row);
       });
@@ -1730,6 +1825,14 @@ python server.py</pre>
         renderSegmentsList(state.currentTranscriptSegments);
       });
 
+      document.getElementById('extractDirectUrlBtn').addEventListener('click', extractDirectVideoUrl);
+      document.getElementById('directVideoUrlInput').addEventListener('keydown', event => {
+        if (event.key === 'Enter' && !document.getElementById('extractDirectUrlBtn').disabled) {
+          event.preventDefault();
+          extractDirectVideoUrl();
+        }
+      });
+
       // 자막 즉시 재추출 버튼
       document.getElementById('extractTranscriptNowBtn').addEventListener('click', () => {
         if (state.selectedVideo) {
@@ -1753,7 +1856,7 @@ python server.py</pre>
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `${state.selectedVideo.videoId}_${document.getElementById('subtitleLangSelect').value}.srt`;
+        a.download = `${state.selectedVideo.videoId}_${state.currentTranscriptLanguage || document.getElementById('subtitleLangSelect').value}.srt`;
         document.body.appendChild(a);
         a.click();
         a.remove();

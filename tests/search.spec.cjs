@@ -16,6 +16,16 @@ const source = fs.readFileSync(path.join(__dirname,'..','k_content_scout_dashboa
   await page.route('**/*',async route=>{
    const u=new URL(route.request().url());
    if(u.origin===new URL(html).origin) return route.continue();
+   if(u.hostname==='127.0.0.1' && u.port==='5000' && options.transcriptServer) {
+    if(u.pathname==='/api/health') return route.fulfill({contentType:'application/json',body:JSON.stringify({status:'ok'})});
+    if(u.pathname==='/api/transcript') {
+     calls.push(u);
+     if(options.transcriptServer==='error') return route.fulfill({status:404,contentType:'application/json',body:JSON.stringify({status:'error',error:'공개 자막이 없습니다'})});
+     const lang=u.searchParams.get('lang');
+     if(options.transcriptDelay && lang==='en') await new Promise(r=>setTimeout(r,400));
+     return route.fulfill({contentType:'application/json',body:JSON.stringify({status:'ok',language:lang,language_code:lang,segments:[{start:1.5,time:'00:01',duration:2,text:'원본 <장면> & 내용 '+lang}]})});
+    }
+   }
    if(u.hostname==='127.0.0.1' && u.port==='5000' && options.downloadServer) {
     if(u.pathname==='/api/health') return route.fulfill({contentType:'application/json',body:JSON.stringify({status:'ok',video_download:options.downloadServer!=='old',ffmpeg:true})});
     if(u.pathname==='/api/download') {
@@ -205,6 +215,59 @@ const source = fs.readFileSync(path.join(__dirname,'..','k_content_scout_dashboa
   await search(p);await p.evaluate(()=>Promise.all([fetchDiscoveryPage(true),fetchDiscoveryPage(true)]));
   assert.equal(calls.filter(u=>u.pathname.endsWith('/search')).length,2);
   assert.equal(await p.evaluate(()=>state.allVideos.length),70);
+ });
+ await test('Direct URL parser supports watch, short, Shorts, live, embed and raw IDs',{},async p=>{
+  const inputs=['https://www.youtube.com/watch?v=abc123def45&t=15s','https://youtu.be/abc123def45?si=share','https://youtube.com/shorts/abc123def45','https://m.youtube.com/watch?v=abc123def45','https://youtube.com/live/abc123def45','https://www.youtube-nocookie.com/embed/abc123def45','youtube.com/watch?v=abc123def45','abc123def45'];
+  for(const url of inputs) assert.equal(await p.evaluate(url=>parseYouTubeVideoId(url),url),'abc123def45');
+  for(const url of ['https://youtube.com.evil.test/watch?v=abc123def45','https://youtube.com@evil.test/watch?v=abc123def45','javascript:alert(1)','https://youtube.com/playlist?list=abc123def45','https://example.com/abc123def45','https://youtube.com/watch?v=short','']) assert.equal(await p.evaluate(url=>parseYouTubeVideoId(url),url),null);
+ });
+ await test('Direct extraction needs no API key, preserves results, and exports actual SRT',{transcriptServer:'ok'},async(p,calls)=>{
+  const count=await p.evaluate(()=>state.allVideos.length);
+  await p.fill('#apiKeyInput','');await p.selectOption('#subtitleLangSelect','ko');
+  await p.fill('#directVideoUrlInput','https://youtu.be/abc123def45?t=10');await p.click('#extractDirectUrlBtn');
+  await p.waitForFunction(()=>!document.getElementById('extractDirectUrlBtn').disabled);
+  assert.equal(await p.evaluate(()=>state.selectedVideo.videoId),'abc123def45');
+  assert.equal(calls.filter(u=>u.hostname==='www.googleapis.com').length,0);
+  assert.equal(calls.filter(u=>u.pathname==='/api/transcript').length,1);
+  assert.equal(await p.evaluate(()=>state.allVideos.length),count);
+  assert.match(await p.locator('#transcriptSegmentsList').innerText(),/원본 <장면> & 내용 ko/);
+  assert.equal(await p.locator('#transcriptSegmentsList 장면').count(),0);
+  assert.match(await p.locator('#reviewPromptTextarea').inputValue(),/통계|조회하지 않았습니다/);
+  await p.fill('#minViewsInput','2000');assert.equal(await p.evaluate(()=>state.selectedVideo.videoId),'abc123def45');
+  const saved=p.waitForEvent('download');await p.click('#downloadSrtBtn');const file=await saved;
+  assert.equal(file.suggestedFilename(),'abc123def45_ko.srt');
+  assert.match(fs.readFileSync(await file.path(),'utf8'),/00:00:01,500 --> 00:00:03,500/);
+  assert.match(fs.readFileSync(await file.path(),'utf8'),/원본 <장면> & 내용 ko/);
+ });
+ await test('Invalid direct URL does not replace selected video',{},async p=>{
+  const selected=await p.evaluate(()=>state.selectedVideo.videoId);
+  await p.fill('#directVideoUrlInput','https://example.com/video');await p.click('#extractDirectUrlBtn');
+  assert.equal(await p.evaluate(()=>state.selectedVideo.videoId),selected);
+  assert.match(await p.locator('#directVideoStatus').innerText(),/올바른 YouTube/);
+ });
+ await test('Direct extraction without local server clears stale transcript and explains startup',{},async p=>{
+  await p.fill('#directVideoUrlInput','abc123def45');await p.locator('#directVideoUrlInput').press('Enter');
+  await p.waitForFunction(()=>!document.getElementById('extractDirectUrlBtn').disabled);
+  assert.match(await p.locator('#directVideoStatus').innerText(),/python server.py/);
+  assert.equal(await p.locator('#transcriptFullTextarea').inputValue(),'');
+  assert.equal(await p.evaluate(()=>state.currentTranscriptSegments.length),0);
+ });
+ await test('Direct missing captions surface server error instead of generated metadata',{transcriptServer:'error'},async p=>{
+  await p.fill('#directVideoUrlInput','abc123def45');await p.click('#extractDirectUrlBtn');
+  await p.waitForFunction(()=>!document.getElementById('extractDirectUrlBtn').disabled);
+  assert.match(await p.locator('#directVideoStatus').innerText(),/공개 자막이 없습니다/);
+  assert.equal(await p.locator('#reviewPromptTextarea').inputValue(),'');
+  assert.equal(await p.evaluate(()=>state.currentTranscriptSegments.length),0);
+ });
+ await test('New language extraction cannot be overwritten by an older request',{transcriptServer:'ok',transcriptDelay:true},async p=>{
+  await p.selectOption('#subtitleLangSelect','en');await p.fill('#directVideoUrlInput','abc123def45');
+  const requested=p.waitForRequest(r=>r.url().includes('/api/transcript?videoId=abc123def45&lang=en'));
+  await p.click('#extractDirectUrlBtn');await requested;
+  await p.selectOption('#subtitleLangSelect','ko');await p.click('#extractTranscriptNowBtn');
+  await p.waitForFunction(()=>state.currentTranscriptLanguage==='ko');
+  await p.waitForFunction(()=>!document.getElementById('extractDirectUrlBtn').disabled);
+  assert.equal(await p.evaluate(()=>state.currentTranscriptLanguage),'ko');
+  assert.match(await p.locator('#transcriptFullTextarea').inputValue(),/내용 ko/);
  });
  await browser.close();server.close();console.log(`${passed} browser regression scenarios passed (mock YouTube API).`);
 })().catch(e=>{console.error(e);process.exit(1)});

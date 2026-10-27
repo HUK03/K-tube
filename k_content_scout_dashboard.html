@@ -236,6 +236,24 @@
       <p id="directVideoStatus" role="status" aria-live="polite" class="text-xs text-slate-300">원본 주소를 입력하면 해당 영상의 자막 작업창이 열립니다.</p>
     </section>
 
+    <section class="glass-card rounded-xl p-4 space-y-3" aria-label="쇼츠 자동 제작">
+      <h2 class="text-sm font-bold">오늘의 해외 반응 쇼츠 자동 제작</h2>
+      <div class="flex flex-wrap gap-2 items-center text-xs">
+        <select id="automationSourceSelect" class="rounded bg-slate-900 p-2">
+          <option value="search">키워드로 선정 · 최근 7일</option>
+          <option value="selected">자막 작업창의 영상 사용</option>
+        </select>
+        <label>최대 쇼츠 수 <select id="automationCountSelect" class="rounded bg-slate-900 p-2"><option value="1">1개</option><option value="2">2개</option><option value="3" selected>3개</option></select></label>
+        <button id="startAutomationBtn" type="button" class="rounded bg-rose-600 px-4 py-2 font-bold disabled:opacity-50">쇼츠 자동 제작 시작</button>
+        <button id="resumeAutomationBtn" type="button" class="rounded bg-slate-700 px-3 py-2">최근 작업 상태 확인</button>
+      </div>
+      <p class="text-xs text-slate-400">후보 선정 → 자막·원본 확보 → 최대 59초 연속 구간 → 9:16 세로 편집 → 저장·보고. Python 서버와 FFmpeg가 필요합니다. 원본 음성·추출 언어 자막을 사용하며 자동 번역은 하지 않습니다.</p>
+      <p class="text-xs text-slate-400">자막의 한국 관련 표현·긍정 반응으로 구간을 추천합니다. 충분한 구간이 없으면 개수가 줄거나 제작이 중단됩니다. 결과는 서버 PC의 outputs 폴더에 저장됩니다.</p>
+      <progress id="automationProgress" max="100" value="0" class="w-full"></progress>
+      <p id="automationStatus" role="status" aria-live="polite" class="text-xs">제작 대기 중</p>
+      <div id="automationReport" class="space-y-2 text-xs"></div>
+    </section>
+
     <!-- KPI Summary & Analytics Row -->
     <section class="grid grid-cols-1 lg:grid-cols-12 gap-6">
       <!-- 4 KPI Cards + Quick Sort Controls -->
@@ -618,6 +636,8 @@ python server.py</pre>
     const state = {
       apiKey: '',
       downloadBusy: false,
+      automationBusy: false,
+      automationPollId: 0,
       searchSummary: null,
       lastSuccessfulSearch: null,
       pagination: null,
@@ -1586,14 +1606,14 @@ python server.py</pre>
 
     async function fetchDiscoveryPage(append) {
       const btn = document.getElementById('executeSearchBtn');
-      if (btn.disabled) return;
+      if (btn.disabled) return false;
       const apiKey = (document.getElementById('apiKeyInput').value || state.apiKey || '').trim();
       const { queries, maxDays, cacheKey } = currentSearchCriteria();
       if (!queries.length || queries.length > 10) {
         showToast('키워드는 1~10개 입력하세요. 여러 키워드는 | 또는 쉼표로 구분합니다.', 'warn');
-        return;
+        return false;
       }
-      if (append && (state.pagination?.cacheKey !== cacheKey || !state.pagination?.nextPageToken)) return;
+      if (append && (state.pagination?.cacheKey !== cacheKey || !state.pagination?.nextPageToken)) return false;
       const previous = state.lastSuccessfulSearch || loadSearchCache();
       const startingVideos = append ? [...state.allVideos] : [];
       const pageToken = append ? state.pagination.nextPageToken : '';
@@ -1610,7 +1630,7 @@ python server.py</pre>
           state.searchSummary = { message: `저장 결과 재사용 (추가 API 요청 없음): ${cache.message}` };
           applyFiltersAndRender();
           updateSearchBudget();
-          return;
+          return true;
         }
       }
       if (!apiKey) {
@@ -1618,7 +1638,7 @@ python server.py</pre>
         applyFiltersAndRender();
         updateSearchBudget();
         showToast('실제 검색에는 YouTube Data API 키가 필요합니다.', 'warn');
-        return;
+        return false;
       }
       state.searchSummary = { message: append ? '추가 50개 검색 중 · 기존 결과 유지' : '검색 중' };
       applyFiltersAndRender();
@@ -1672,6 +1692,7 @@ python server.py</pre>
         rememberSearch(cacheKey);
         applyFiltersAndRender();
         showToast(`수집 후보 ${state.allVideos.length}개 / 현재 표시 ${state.filteredVideos.length}개`, state.filteredVideos.length ? 'success' : 'warn');
+        return true;
       } catch (error) {
         clearSearchResults();
         // Do not expose the API key if an upstream error echoes it.
@@ -1684,6 +1705,7 @@ python server.py</pre>
         state.searchSummary = { message: `검색 실패: ${message}${previous ? ' · 새 검색 결과가 아닙니다. 이전 성공 결과를 유지합니다: ' + previous.queries.join(' | ') : ''}` };
         applyFiltersAndRender();
         showToast(`검색 실패: ${message}`, 'error');
+        return false;
       } finally {
         btn.disabled = false;
         btn.innerHTML = originalBtnHtml;
@@ -1728,9 +1750,125 @@ python server.py</pre>
     }
 
     // =========================================================================
+    function setAutomationBusy(busy) {
+      state.automationBusy = busy;
+      document.getElementById('startAutomationBtn').disabled = busy;
+    }
+
+    function showAutomationReport(jobId, report) {
+      const container = document.getElementById('automationReport');
+      container.replaceChildren();
+      if (!report) return;
+      const summary = document.createElement('p');
+      summary.textContent = `${report.source?.title || report.source?.videoId || '영상 선정 실패'} · 저장된 쇼츠 ${(report.clips || []).length}개 / 요청 ${report.requested_clips || 0}개`;
+      container.appendChild(summary);
+      if (report.saved_directory) {
+        const path = document.createElement('p');
+        path.textContent = `서버 PC 저장 위치: ${report.saved_directory}`;
+        container.appendChild(path);
+      }
+      for (const clip of report.clips || []) {
+        const row = document.createElement('p');
+        row.textContent = `${clip.file} · 원본 ${clip.start.toFixed(1)}~${clip.end.toFixed(1)}초 · 결과 ${clip.duration.toFixed(1)}초 · ${clip.reason}`;
+        container.appendChild(row);
+      }
+      for (const attempt of report.attempts || []) {
+        if (!attempt.error) continue;
+        const row = document.createElement('p');
+        row.textContent = `후보 ${attempt.videoId}: ${attempt.error}`;
+        container.appendChild(row);
+      }
+      for (const name of report.artifacts || []) {
+        const link = document.createElement('a');
+        link.textContent = `다운로드: ${name}`;
+        link.className = 'block text-indigo-300 underline';
+        link.href = `${state.localServerUrl}/api/automation/${jobId}/files/${name.split('/').map(encodeURIComponent).join('/')}`;
+        link.target = '_blank'; link.rel = 'noopener';
+        container.appendChild(link);
+      }
+    }
+
+    async function pollAutomation(jobId) {
+      const generation = ++state.automationPollId;
+      setAutomationBusy(true);
+      try {
+        while (generation === state.automationPollId) {
+          const response = await fetch(`${state.localServerUrl}/api/automation/${jobId}`, { signal: AbortSignal.timeout(8000) });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || '작업 상태를 읽지 못했습니다.');
+          if (generation !== state.automationPollId) return;
+          document.getElementById('automationProgress').value = data.progress || 0;
+          document.getElementById('automationStatus').textContent = `${data.stage} (${data.progress || 0}%)`;
+          if (data.status === 'completed' || data.status === 'failed') {
+            showAutomationReport(jobId, data.report);
+            document.getElementById('automationStatus').textContent = data.status === 'completed'
+              ? `저장 완료 · 쇼츠 ${data.report?.clips?.length || 0}개. 아래에서 결과와 보고서를 받으세요.`
+              : `제작 실패: ${data.report?.error || '작업 중 오류가 발생했습니다.'}`;
+            return;
+          }
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+      } catch (error) {
+        document.getElementById('automationStatus').textContent = `상태 확인 중단: ${error.message} · 서버가 실행 중이면 작업이 계속될 수 있습니다. 최근 작업 상태 확인을 눌러주세요.`;
+      } finally {
+        if (generation === state.automationPollId) setAutomationBusy(false);
+      }
+    }
+
+    async function startAutomaticShorts() {
+      if (state.automationBusy) return;
+      setAutomationBusy(true);
+      document.getElementById('automationReport').replaceChildren();
+      document.getElementById('automationProgress').value = 0;
+      try {
+        document.getElementById('automationStatus').textContent = '자동 편집 서버 확인 중...';
+        let health;
+        try {
+          const response = await fetch(`${state.localServerUrl}/api/health`, { signal: AbortSignal.timeout(3000) });
+          health = response.ok ? await response.json() : null;
+        } catch { throw new Error('Python 서버에 연결할 수 없습니다. 최신 파일에서 python server.py를 실행하세요.'); }
+        if (!health?.automation) throw new Error('최신 server.py와 automation.py로 교체하고 서버를 재시작하세요.');
+        if (!health.ffmpeg || !health.ffprobe) throw new Error('FFmpeg와 ffprobe를 설치한 뒤 서버를 재시작하세요.');
+        let candidates;
+        if (document.getElementById('automationSourceSelect').value === 'selected') {
+          const video = state.selectedVideo;
+          if (!video || video.channelId?.startsWith('UC_demo_') || !/^[A-Za-z0-9_-]{11}$/.test(video.videoId)) throw new Error('실제 영상 검색 또는 원본 주소 입력으로 작업할 영상을 선택하세요.');
+          candidates = [{videoId: video.videoId, title: video.title, selection_reason: '사용자가 자막 작업창에서 선택'}];
+        } else {
+          document.getElementById('automationStatus').textContent = '최근 7일 영상 후보 검색 중...';
+          document.getElementById('daysFilterSelect').value = '7';
+          updateSearchBudget();
+          const success = await executeYouTubeApiDiscovery();
+          if (!success) throw new Error('오늘의 후보 검색에 실패했습니다. 검색 오류를 확인하거나 자막 작업창의 영상 사용을 선택하세요.');
+          candidates = [...state.filteredVideos].filter(v => ['S', 'A'].includes(v.grade) && /^[A-Za-z0-9_-]{11}$/.test(v.videoId)).sort(compareRank).slice(0, 3)
+            .map(v => ({videoId: v.videoId, title: v.title, selection_reason: `${v.grade} 등급 · ${v.rankScore}점 · 최근 7일 관련성/조회수/배수 기준`}));
+          if (!candidates.length) throw new Error('제작할 S/A 등급 후보가 없습니다. 키워드를 바꾸거나 원본 주소로 영상을 선택하세요.');
+        }
+        document.getElementById('automationStatus').textContent = '쇼츠 제작 작업을 시작합니다...';
+        const response = await fetch(`${state.localServerUrl}/api/automation`, {
+          method: 'POST', headers: {'Content-Type':'application/json'}, signal: AbortSignal.timeout(20000),
+          body: JSON.stringify({candidates, clip_count: Number(document.getElementById('automationCountSelect').value), language: document.getElementById('subtitleLangSelect').value})
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || '제작 요청에 실패했습니다.');
+        if (!/^[a-f0-9]{32}$/.test(data.job_id)) throw new Error('작업 번호를 받지 못했습니다.');
+        try { localStorage.setItem('kscout_automation_job', data.job_id); } catch {}
+        await pollAutomation(data.job_id);
+      } catch (error) {
+        document.getElementById('automationStatus').textContent = `자동 제작 중단: ${error.message}`;
+      } finally { setAutomationBusy(false); }
+    }
+
     // 12. 이벤트 리스너 바인딩 및 초기화
     // =========================================================================
     window.addEventListener('DOMContentLoaded', () => {
+      document.getElementById('startAutomationBtn').addEventListener('click', startAutomaticShorts);
+      document.getElementById('resumeAutomationBtn').addEventListener('click', () => {
+        let id;
+        try { id = localStorage.getItem('kscout_automation_job'); } catch {}
+        if (id && /^[a-f0-9]{32}$/.test(id)) pollAutomation(id);
+        else document.getElementById('automationStatus').textContent = '저장된 작업이 없습니다.';
+      });
       // 저장된 API 키 복원
       const apiKeyInput = document.getElementById('apiKeyInput');
       if (state.apiKey) apiKeyInput.value = state.apiKey;

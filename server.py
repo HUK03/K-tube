@@ -26,8 +26,10 @@ from pathlib import Path
 from flask import Flask, request, jsonify, send_from_directory, send_file
 from flask_cors import CORS
 
-app = Flask(__name__, static_folder='.')
+app = Flask(__name__, static_folder=None)
 CORS(app, expose_headers=['Content-Disposition'])
+from automation import bp as automation_blueprint
+app.register_blueprint(automation_blueprint)
 
 DOWNLOAD_LIMIT = 250 * 1024 * 1024
 DOWNLOAD_TIMEOUT = 180
@@ -67,7 +69,7 @@ def index():
 @app.route('/api/health', methods=['GET'])
 def health():
     return jsonify({"status": "ok", "service": "k-content-scout-transcript-server", "port": 5000,
-                    "video_download": True, "ffmpeg": bool(shutil.which('ffmpeg'))})
+                    "video_download": True, "automation": True, "ffmpeg": bool(shutil.which('ffmpeg')), "ffprobe": bool(shutil.which('ffprobe'))})
 
 
 @app.route('/api/download', methods=['POST'])

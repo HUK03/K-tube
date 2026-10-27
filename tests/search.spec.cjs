@@ -16,6 +16,19 @@ const source = fs.readFileSync(path.join(__dirname,'..','k_content_scout_dashboa
   await page.route('**/*',async route=>{
    const u=new URL(route.request().url());
    if(u.origin===new URL(html).origin) return route.continue();
+   if(u.hostname==='127.0.0.1' && u.port==='5000' && options.automationServer) {
+    if(u.pathname==='/api/health') return route.fulfill({contentType:'application/json',body:JSON.stringify({status:'ok',automation:true,ffmpeg:options.automationServer!=='missing',ffprobe:true})});
+    if(u.pathname==='/api/automation') {
+     calls.push(u);
+     const payload=route.request().postDataJSON();assert.equal(payload.clip_count,3);assert.equal(payload.candidates[0].videoId,'abc123def45');assert.equal('apiKey' in payload,false);
+     return route.fulfill({status:202,contentType:'application/json',body:JSON.stringify({job_id:'a'.repeat(32)})});
+    }
+    if(u.pathname==='/api/automation/'+'a'.repeat(32)) {
+     calls.push(u);
+     const failed=options.automationServer==='failed';
+     return route.fulfill({contentType:'application/json',body:JSON.stringify({status:failed?'failed':'completed',stage:'저장 완료',progress:100,report:{source:{title:'한국 음식 해외반응'},requested_clips:3,clips:failed?[]:[{file:'short-01.mp4',start:3,end:40,duration:37,reason:'한국 관련 긍정 반응'}],artifacts:failed?['report.json']:['short-01.mp4','report.json','shorts-results.zip'],error:failed?'자막을 확보하지 못했습니다':undefined}})});
+    }
+   }
    if(u.hostname==='127.0.0.1' && u.port==='5000' && options.transcriptServer) {
     if(u.pathname==='/api/health') return route.fulfill({contentType:'application/json',body:JSON.stringify({status:'ok'})});
     if(u.pathname==='/api/transcript') {
@@ -268,6 +281,42 @@ const source = fs.readFileSync(path.join(__dirname,'..','k_content_scout_dashboa
   await p.waitForFunction(()=>!document.getElementById('extractDirectUrlBtn').disabled);
   assert.equal(await p.evaluate(()=>state.currentTranscriptLanguage),'ko');
   assert.match(await p.locator('#transcriptFullTextarea').inputValue(),/내용 ko/);
+ });
+ await test('Automatic Shorts searches once, submits ranked candidates, and reports saved clips',{automationServer:'ok',videos:[{id:'abc123def45',title:'한국 음식 해외반응',views:100000}]},async(p,calls)=>{
+  await p.click('#startAutomationBtn');await p.waitForFunction(()=>!state.automationBusy);
+  assert.equal(calls.filter(u=>u.pathname.endsWith('/search')).length,1);
+  assert.equal(calls.filter(u=>u.pathname==='/api/automation').length,1);
+  assert.equal(await p.locator('#daysFilterSelect').inputValue(),'7');
+  assert.match(await p.locator('#automationStatus').innerText(),/저장 완료 · 쇼츠 1개/);
+  assert.equal(await p.locator('#automationReport a').count(),3);
+ });
+ await test('Automation never creates a job after quota failure',{automationServer:'ok',quotaAtSearch:1},async(p,calls)=>{
+  await p.click('#startAutomationBtn');await p.waitForFunction(()=>!state.automationBusy);
+  assert.equal(calls.filter(u=>u.pathname==='/api/automation').length,0);
+  assert.match(await p.locator('#automationStatus').innerText(),/후보 검색에 실패/);
+ });
+ await test('Missing FFmpeg blocks automation before spending search quota',{automationServer:'missing'},async(p,calls)=>{
+  await p.click('#startAutomationBtn');await p.waitForFunction(()=>!state.automationBusy);
+  assert.equal(calls.length,0);assert.match(await p.locator('#automationStatus').innerText(),/FFmpeg/);
+ });
+ await test('Selected original video can be produced without search or API key',{automationServer:'ok'},async(p,calls)=>{
+  await p.evaluate(()=>{state.selectedVideo={videoId:'abc123def45',title:'원본',directInput:true};});
+  await p.fill('#apiKeyInput','');await p.selectOption('#automationSourceSelect','selected');
+  await p.click('#startAutomationBtn');await p.waitForFunction(()=>!state.automationBusy);
+  assert.equal(calls.filter(u=>u.hostname==='www.googleapis.com').length,0);
+  assert.match(await p.locator('#automationStatus').innerText(),/저장 완료/);
+ });
+ await test('Failed automation reports failure without claiming saved Shorts',{automationServer:'failed'},async p=>{
+  await p.evaluate(()=>{state.selectedVideo={videoId:'abc123def45',title:'원본',directInput:true};});
+  await p.selectOption('#automationSourceSelect','selected');await p.click('#startAutomationBtn');
+  await p.waitForFunction(()=>!state.automationBusy);
+  assert.match(await p.locator('#automationStatus').innerText(),/제작 실패.*자막/);
+ });
+ await test('Saved job can be checked without submitting a new production job',{automationServer:'ok'},async(p,calls)=>{
+  await p.evaluate(()=>localStorage.setItem('kscout_automation_job','a'.repeat(32)));
+  await p.click('#resumeAutomationBtn');await p.waitForFunction(()=>!state.automationBusy);
+  assert.equal(calls.filter(u=>u.pathname==='/api/automation').length,0);
+  assert.match(await p.locator('#automationStatus').innerText(),/저장 완료/);
  });
  await browser.close();server.close();console.log(`${passed} browser regression scenarios passed (mock YouTube API).`);
 })().catch(e=>{console.error(e);process.exit(1)});

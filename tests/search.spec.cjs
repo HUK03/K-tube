@@ -72,11 +72,11 @@ const source = fs.readFileSync(path.join(__dirname,'..','k_content_scout_dashboa
  }
  async function more(page){await page.click('#loadMoreSearchBtn');await page.waitForFunction(()=>!document.getElementById('executeSearchBtn').disabled);}
  async function search(page){await page.click('#executeSearchBtn');await page.waitForFunction(()=>!document.getElementById('executeSearchBtn').disabled);}
- await test('Korean/KR videos with low views remain visible and receive grade',{},async p=>{
+ await test('Generic Korean/KR titles remain visible but are not automatically S grade',{},async p=>{
   await search(p);assert.equal(await p.evaluate(()=>state.filteredVideos.length),1);
   assert.equal(await p.evaluate(()=>state.filteredVideos[0].country),'KR');
-  assert.equal(await p.evaluate(()=>state.filteredVideos[0].grade),'S');
-  assert.match(await p.locator('#videoCardsContainer').innerText(),/S 등급 · 1위/);
+  assert.equal(await p.evaluate(()=>state.filteredVideos[0].grade),'A');
+  assert.match(await p.locator('#videoCardsContainer').innerText(),/A 등급 · 1위/);
  });
  await test('One request per click, pagination and deduplication',{pages:true},async(p,calls)=>{
   await search(p);assert.equal(calls.filter(u=>u.pathname.endsWith('/search')).length,1);
@@ -109,7 +109,7 @@ const source = fs.readFileSync(path.join(__dirname,'..','k_content_scout_dashboa
   await search(p);assert.equal(await p.evaluate(()=>state.currentTab),'all');assert.equal(await p.locator('#quickTextFilterInput').inputValue(),'');
   assert.equal(await p.evaluate(()=>state.filteredVideos.length),1);
  });
- await test('S/A/B sorting prioritizes query relevance above unrelated popularity',{videos:[{id:'b',title:'Football championship',views:10000000},{id:'a',title:'한국 일상',views:5000},{id:'s',title:'한국 음식 해외반응',views:100}]},async p=>{
+ await test('S/A/B sorting prioritizes query relevance above unrelated popularity',{videos:[{id:'b',title:'Football championship',views:10000000},{id:'a',title:'한국 일상',views:5000},{id:'s',title:'한국 음식 해외반응: 처음 먹어본 외국인 정말 맛있어요',views:100}]},async p=>{
   await search(p);assert.deepEqual(await p.evaluate(()=>state.filteredVideos.map(v=>v.grade)),['S','A','B']);
   assert.deepEqual(await p.evaluate(()=>state.filteredVideos.map(v=>v.videoId)),['s','a','b']);
   await p.fill('#minViewsInput','99999999');assert.equal(await p.evaluate(()=>state.filteredVideos.length),3);
@@ -216,7 +216,7 @@ const source = fs.readFileSync(path.join(__dirname,'..','k_content_scout_dashboa
   assert.equal(await p.locator('#loadMoreSearchBtn').isEnabled(),false);
   await p.evaluate(()=>fetchDiscoveryPage(true));assert.equal(calls.filter(u=>u.pathname.endsWith('/search')).length,1);
   await p.fill('#searchQueryInput','한국 음식 해외반응');assert.equal(await p.locator('#loadMoreSearchBtn').isEnabled(),true);
-  await p.selectOption('#daysFilterSelect','90');assert.equal(await p.locator('#loadMoreSearchBtn').isEnabled(),false);
+  await p.selectOption('#daysFilterSelect','30');assert.equal(await p.locator('#loadMoreSearchBtn').isEnabled(),false);
  });
  await test('Additional detail failure preserves previous data and cursor',{failVideosAt:2,paginateFixtures:true,videos:Array.from({length:60},(_,i)=>({id:'d'+i,title:'한국 음식 해외반응',views:i}))},async p=>{
   await search(p);await more(p);
@@ -317,6 +317,34 @@ const source = fs.readFileSync(path.join(__dirname,'..','k_content_scout_dashboa
   await p.click('#resumeAutomationBtn');await p.waitForFunction(()=>!state.automationBusy);
   assert.equal(calls.filter(u=>u.pathname==='/api/automation').length,0);
   assert.match(await p.locator('#automationStatus').innerText(),/저장 완료/);
+ });
+ await test('Source preset replaces mixed topics without spending quota until execution',{},async(p,calls)=>{
+  await p.fill('#searchQueryInput','한국 해외반응 | Korea travel | K-pop reaction');
+  await p.selectOption('#sourcePresetSelect','food');await p.click('#applySourcePresetBtn');
+  assert.equal(await p.locator('#searchQueryInput').inputValue(),'"Korean food" "first time"');
+  assert.equal(calls.length,0);
+  await search(p);const requests=calls.filter(u=>u.pathname.endsWith('/search'));
+  assert.equal(requests.length,1);assert.equal(requests[0].searchParams.get('q'),'"Korean food" "first time"');
+ });
+ await test('Original reaction clues outrank compilations, criticism, and unrelated Korea videos',{videos:[
+  {id:'originalen',title:'My first time trying Korean food: amazing reaction!',views:200000},
+  {id:'originalko',title:'한국 음식 해외반응: 처음 먹어본 외국인 정말 맛있어요',views:200000},
+  {id:'roundup',title:'한국 음식 해외반응 모음 총정리',views:50000000},
+  {id:'negative',title:'My first time trying Korean food, worst experience',views:50000000},
+  {id:'north',title:'First time in North Korea: amazing reaction',views:50000000},
+  {id:'neutral',title:'한국 음식 해외반응',views:50000000}
+ ]},async p=>{
+  await search(p);const rows=await p.evaluate(()=>state.filteredVideos.map(v=>({id:v.videoId,grade:v.grade})));
+  assert.equal(rows.length,6);
+  assert.deepEqual(rows.filter(v=>v.grade==='S').map(v=>v.id).sort(),['originalen','originalko']);
+  for(const id of ['roundup','negative','north']) assert.equal(rows.find(v=>v.id===id).grade,'B');
+  assert.equal(rows.find(v=>v.id==='neutral').grade,'A');
+  assert.match(await p.locator('#videoCardsContainer').innerText(),/해설·재편집 표현/);
+  assert.match(await p.locator('#videoCardsContainer').innerText(),/부정 평가 표현/);
+ });
+ await test('Description-only original/positive phrases cannot promote a generic title to S',{},async p=>{
+  const result=await p.evaluate(()=>rankVideo({title:'한국 음식 해외반응',description:'My first time in Korea, amazing food',viewCount:99999999,publishedAt:new Date().toISOString()},1000,100000,5));
+  assert.equal(result.grade,'A');
  });
  await browser.close();server.close();console.log(`${passed} browser regression scenarios passed (mock YouTube API).`);
 })().catch(e=>{console.error(e);process.exit(1)});

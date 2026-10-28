@@ -33,6 +33,14 @@ class AutomationTests(unittest.TestCase):
             self.assertEqual(automation.choose_clips([{'start': 0, 'duration': 20, 'text': text}], 20, 3), [])
         self.assertEqual(automation.choose_clips([{'start': 0, 'duration': 2, 'text': 'Korea amazing'}], 2, 3), [])
 
+    def test_multilingual_culture_reactions_can_be_used_for_clips(self):
+        for text in ['Samgyeopsal primera vez increíble', 'Samgyeopsal première fois délicieux',
+                     'Samgyeopsal zum ersten Mal unglaublich', 'Samgyeopsal pertama kali enak',
+                     'サムギョプサル 初めて 美味しい', '韩式烤五花肉 初体验 好吃', 'Daejeon is amazing']:
+            clips = automation.choose_clips([{'start':0,'duration':20,'text':text}],20,1)
+            self.assertEqual(len(clips),1,text)
+        self.assertEqual(automation.choose_clips([{'start':0,'duration':20,'text':'Samgyeopsal increíble pero no me gusta'}],20,1),[])
+
     def test_bad_requests_and_missing_ffmpeg(self):
         client = server.app.test_client()
         for data in [{}, {'candidates': [{'videoId': '../escape'}]}, {'candidates': [{'videoId': 'abc123def45'}], 'clip_count': 9}]:

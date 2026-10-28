@@ -346,5 +346,37 @@ const source = fs.readFileSync(path.join(__dirname,'..','k_content_scout_dashboa
   const result=await p.evaluate(()=>rankVideo({title:'한국 음식 해외반응',description:'My first time in Korea, amazing food',viewCount:99999999,publishedAt:new Date().toISOString()},1000,100000,5));
   assert.equal(result.grade,'A');
  });
+ await test('All preset topics have curated expressions in eight languages',{},async p=>{
+  const valid=await p.evaluate(()=>{
+   const topics=Array.from(document.getElementById('sourcePresetSelect').options,o=>o.value);
+   return Object.keys(SEARCH_LANGUAGES).length===8 && topics.every(topic=>Object.keys(SEARCH_LANGUAGES).every(language=>{const q=sourcePresetQueries(topic,language);return q.length>=1 && q.length<=2 && q.every(s=>typeof s==='string' && s.length>0 && !s.includes('undefined'));}));
+  });assert.equal(valid,true);
+ });
+ await test('Trip travel vlog and both cities produce distinct English searches',{},async p=>{
+  const result=await p.evaluate(()=>Object.fromEntries(['trip','travel_general','vlog','busan','daejeon'].map(topic=>[topic,sourcePresetQueries(topic,'en')])));
+  assert.deepEqual(result.trip,['Korea trip']);assert.deepEqual(result.travel_general,['Korea travel']);assert.deepEqual(result.vlog,['Korea vlog']);
+  assert.ok(result.busan.some(q=>q.includes('Busan')));assert.ok(result.daejeon.some(q=>q.includes('Daejeon')));
+ });
+ await test('Native and explanatory food terms can be combined across languages in one API call',{},async(p,calls)=>{
+  await p.selectOption('#sourcePresetSelect','samgyeopsal');await p.selectOption('#sourceLanguageSelect','en');
+  await p.click('#applySourcePresetBtn');assert.match(await p.locator('#searchQueryInput').inputValue(),/samgyeopsal.*Korean pork belly/);
+  await p.selectOption('#sourceLanguageSelect','ja');
+  assert.match(await p.locator('#sourcePresetPreview').innerText(),/サムギョプサル/);
+  await p.click('#addSourcePresetBtn');const q=await p.locator('#searchQueryInput').inputValue();
+  assert.match(q,/samgyeopsal/);assert.match(q,/サムギョプサル/);assert.equal(calls.length,0);
+  await search(p);const req=calls.filter(u=>u.pathname.endsWith('/search'));assert.equal(req.length,1);assert.equal(req[0].searchParams.get('q'),q);
+ });
+ await test('Adding another language never silently exceeds ten expressions',{},async p=>{
+  const q=Array.from({length:10},(_,i)=>'custom'+i).join(' | ');await p.fill('#searchQueryInput',q);
+  await p.selectOption('#sourcePresetSelect','samgyeopsal');await p.selectOption('#sourceLanguageSelect','fr');await p.click('#addSourcePresetBtn');
+  assert.equal(await p.locator('#searchQueryInput').inputValue(),q);assert.match(await p.locator('#toastContainer').innerText(),/최대 10개/);
+ });
+ await test('Non-English first-hand food reactions and Daejeon receive source relevance credit',{},async p=>{
+  const cases=[['en','samgyeopsal','Samgyeopsal first time, amazing!'],['ko','samgyeopsal','외국인 삼겹살 처음 정말 맛있다'],['ja','samgyeopsal','サムギョプサル 初めて 美味しい'],['zh','samgyeopsal','韩式烤五花肉 初体验 太好吃了'],['es','samgyeopsal','Samgyeopsal primera vez increíble'],['fr','samgyeopsal','Samgyeopsal première fois délicieux'],['de','samgyeopsal','Samgyeopsal zum ersten Mal unglaublich'],['id','samgyeopsal','Samgyeopsal pertama kali enak'],['en','daejeon','Daejeon vlog first time, amazing!']];
+  for(const [lang,topic,title] of cases){
+   const result=await p.evaluate(({lang,topic,title})=>{state.rankingQueries=sourcePresetQueries(topic,lang);return rankVideo({title,viewCount:200000,publishedAt:new Date().toISOString()},10,100000,5);},{lang,topic,title});
+   assert.equal(result.grade,'S',lang+': '+JSON.stringify(result));
+  }
+ });
  await browser.close();server.close();console.log(`${passed} browser regression scenarios passed (mock YouTube API).`);
 })().catch(e=>{console.error(e);process.exit(1)});

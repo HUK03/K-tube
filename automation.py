@@ -23,6 +23,15 @@ REACTIONS = ['amazing', 'incredible', 'impressed', 'delicious', 'love it', 'beau
 TOPICS = ['korea', 'korean', 'seoul', 'kimchi', '한국', '서울', '한식', '김치', '韓国', '韩国']
 NEGATIONS = ['not good', 'not amazing', 'not impressed', 'terrible', 'disappoint', 'hate', '별로', '실망', '최악', '싫어']
 
+# Native-language topic and reaction clues used by the multilingual search presets.
+REACTIONS += ['increíble', 'delicioso', 'sorprend', 'encanta', 'incroyable', 'délicieux', 'surpris', 'adoré',
+              'unglaublich', 'lecker', 'beeindruck', 'überrascht', 'luar biasa', 'enak', 'terkejut', 'takjub',
+              '惊讶', '惊艳', '好吃', '太棒', '震撼', '驚', '感動', '最高']
+TOPICS += ['busan', 'daejeon', 'samgyeopsal', 'samgyupsal', 'hanbok', 'jjimjilbang', '부산', '대전', '삼겹살', '한복', '찜질방',
+           '釜山', 'テジョン', 'サムギョプサル', '韓服', '韩服', 'ハンボク', 'チムジルバン', '汗蒸幕', 'キムチ', '韩式',
+           'corea', 'corée', 'coréen', 'südkorea', 'koreanisch']
+NEGATIONS += ['no me gusta', 'decepcion', 'déçu', 'enttäusch', 'mengecewakan', '失望', '不推荐', '美味しくない']
+
 
 def write_json(path, data):
     tmp = path.with_suffix('.tmp')
@@ -76,7 +85,7 @@ def fetch_primary_transcript(video_id, language):
             return super().request(*args, **kwargs)
     with BoundedSession() as session:
         tracks = YouTubeTranscriptApi(http_client=session).list(video_id)
-        languages = list(dict.fromkeys([language, 'en', 'ko', 'ja', 'es', 'fr', 'de']))
+        languages = list(dict.fromkeys([language, 'en', 'ko', 'ja', 'es', 'fr', 'de', 'zh', 'id']))
         try:
             chosen = tracks.find_transcript(languages)
         except Exception:

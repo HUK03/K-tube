@@ -191,15 +191,30 @@
           <label for="sourcePresetSelect" class="font-bold">원본 소스 주제 선택</label>
           <select id="sourcePresetSelect" class="rounded bg-slate-900 p-2">
             <option value="travel">외국인의 한국 첫 방문</option>
+            <option value="trip">Korea trip · 한국 여행</option>
+            <option value="travel_general">Korea travel · 한국 여행기</option>
+            <option value="vlog">Korea vlog · 한국 브이로그</option>
+            <option value="busan">Busan · 부산 여행</option>
+            <option value="daejeon">Daejeon · 대전 여행</option>
+            <option value="samgyeopsal">삼겹살 · Samgyeopsal</option>
+            <option value="hanbok">한복 체험</option>
+            <option value="jjimjilbang">찜질방 체험</option>
+            <option value="kimchi">김치 시식</option>
             <option value="food">한식 첫 체험</option>
             <option value="safety">치안·거리 체험</option>
             <option value="transit">지하철·교통에 대한 호평</option>
             <option value="technology">한국 기술에 대한 해외 평가</option>
-            <option value="korean">한글로 된 외국인 체험 원본</option>
+            <option value="korean">한글 외국인 체험 (한국어 고정)</option>
             <option value="expert">K팝 전문가 반응</option>
           </select>
-          <button id="applySourcePresetBtn" type="button" class="rounded bg-indigo-600 px-3 py-2">이 주제로 검색어 교체</button>
-          <p>원본을 찾을 때는 제작자가 쓰는 첫 경험·체험 표현을 사용하세요. 여러 주제를 섞으면 결과가 넓어집니다. 주제 선택은 검색어만 교체하며 발굴 버튼을 누를 때 조회합니다.</p>
+          <label for="sourceLanguageSelect">검색 언어</label>
+          <select id="sourceLanguageSelect" class="rounded bg-slate-900 p-2">
+            <option value="en">영어</option><option value="ko">한국어</option><option value="ja">일본어</option><option value="zh">중국어</option><option value="es">스페인어</option><option value="fr">프랑스어</option><option value="de">독일어</option><option value="id">인도네시아어</option>
+          </select>
+          <button id="applySourcePresetBtn" type="button" class="rounded bg-indigo-600 px-3 py-2">주제·언어 검색어 적용</button>
+          <button id="addSourcePresetBtn" type="button" class="rounded bg-slate-700 px-3 py-2">현재 검색어에 추가</button>
+          <p id="sourcePresetPreview" class="text-indigo-300"></p>
+          <p>원본을 찾을 때는 제작자가 쓰는 첫 경험·체험 표현을 사용하세요. 여러 주제를 섞으면 결과가 넓어집니다. 선택 주제의 현지어 검색 표현을 미리 확인하고 적용하세요. 도시·고유 문화는 현지 표기·로마자·설명형 표현을 함께 사용합니다. 여러 언어를 함께 찾으려면 현재 검색어에 추가하세요 (최대 10개). 발굴 버튼을 누를 때만 한 번 조회합니다.</p>
           <p>한글 영상도 포함합니다. 해설·모음 영상과 부정 평가 단서는 순위에 반영하고, 모든 후보는 표시합니다. 오래된 원본은 기간을 1년으로 늘려 찾아보세요.</p>
         </div>
 
@@ -374,6 +389,7 @@
               <option value="ja">일본어 (日本語)</option>
               <option value="es">스페인어 (Español)</option>
               <option value="ko">한국어 자막 (있을 경우)</option>
+              <option value="zh">중국어</option><option value="fr">프랑스어</option><option value="de">독일어</option><option value="id">인도네시아어</option>
             </select>
           </div>
           <button id="extractTranscriptNowBtn" type="button" class="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition flex items-center gap-1.5">
@@ -471,6 +487,54 @@ python server.py</pre>
     // =========================================================================
     // 1. 추천 키워드 카탈로그 (해외 유튜버 한국 관련 바이럴 발굴용)
     // =========================================================================
+    // Curated search expressions, not automatic translation of arbitrary input.
+    const SEARCH_LANGUAGES = {
+      en: {name:'영어', country:'Korea', first:'"first time"', trip:'trip', travel:'travel', vlog:'vlog', busan:'Busan', daejeon:'Daejeon', food:'"Korean food"',
+        safety:'Korea "safe" walking', transit:'Seoul subway impressed', technology:'Korean technology impressed', expert:'"vocal coach" "K-pop" reaction',
+        samgyeopsal:['samgyeopsal "first time"','"Korean pork belly" trying'], hanbok:['hanbok "first time"','"Korean traditional clothing" experience'], jjimjilbang:['jjimjilbang "first time"','"Korean sauna" experience'], kimchi:['kimchi "first time"','trying Korean kimchi']},
+      ko: {name:'한국어', country:'한국', first:'첫 방문', trip:'여행', travel:'여행기', vlog:'브이로그', busan:'부산', daejeon:'대전', food:'외국인 한식',
+        safety:'외국인 한국 치안 체험', transit:'외국인 서울 지하철 감탄', technology:'외국인 한국 기술 놀라운', expert:'해외 보컬 코치 케이팝 반응',
+        samgyeopsal:['외국인 삼겹살 처음','외국인 한국 돼지고기 구이'], hanbok:['외국인 한복 체험','외국인 한국 전통 의상'], jjimjilbang:['외국인 찜질방 처음','외국인 한국 사우나 체험'], kimchi:['외국인 김치 처음','외국인 한국 김치 시식']},
+      ja: {name:'일본어', country:'韓国', first:'初めて', trip:'旅行', travel:'旅行記', vlog:'Vlog', busan:'釜山', daejeon:'テジョン 大田', food:'韓国料理',
+        safety:'韓国 治安 街歩き', transit:'韓国 地下鉄 驚いた', technology:'韓国 技術 驚いた', expert:'ボイストレーナー KPOP リアクション',
+        samgyeopsal:['サムギョプサル 初めて','韓国 豚バラ 焼肉 食べてみた'], hanbok:['韓服 初めて','韓国 ハンボク 体験'], jjimjilbang:['チムジルバン 初めて','韓国 サウナ 体験'], kimchi:['キムチ 初めて','韓国 キムチ 食べてみた']},
+      zh: {name:'중국어', country:'韩国', first:'第一次', trip:'旅行', travel:'旅游', vlog:'vlog', busan:'釜山', daejeon:'韩国 大田', food:'韩国料理',
+        safety:'韩国 治安 街头 体验', transit:'韩国 地铁 惊讶', technology:'韩国 科技 体验', expert:'声乐老师 KPOP 反应',
+        samgyeopsal:['韩式烤五花肉 初体验','samgyeopsal 韩国烤肉'], hanbok:['韩服 初体验','韩国 传统服饰 体验'], jjimjilbang:['韩国 汗蒸幕 初体验','韩国 桑拿 体验'], kimchi:['韩国 泡菜 第一次','韩式泡菜 试吃']},
+      es: {name:'스페인어', country:'Corea del Sur', first:'"primera vez"', trip:'viaje', travel:'viajar', vlog:'vlog', busan:'Busan', daejeon:'Daejeon', food:'comida coreana',
+        safety:'Corea del Sur seguridad caminando', transit:'metro Seúl sorprendente', technology:'tecnología coreana impresionante', expert:'profesor de canto KPOP reacción',
+        samgyeopsal:['samgyeopsal primera vez','panceta coreana probando'], hanbok:['hanbok primera vez','traje tradicional coreano experiencia'], jjimjilbang:['jjimjilbang primera vez','sauna coreana experiencia'], kimchi:['kimchi primera vez','probando kimchi coreano']},
+      fr: {name:'프랑스어', country:'Corée du Sud', first:'"première fois"', trip:'voyage', travel:'voyager', vlog:'vlog', busan:'Busan', daejeon:'Daejeon', food:'cuisine coréenne',
+        safety:'Corée du Sud sécurité promenade', transit:'métro Séoul impressionnant', technology:'technologie coréenne impressionnante', expert:'professeur de chant KPOP réaction',
+        samgyeopsal:['samgyeopsal première fois','poitrine de porc coréenne dégustation'], hanbok:['hanbok première fois','vêtement traditionnel coréen expérience'], jjimjilbang:['jjimjilbang première fois','sauna coréen expérience'], kimchi:['kimchi première fois','dégustation kimchi coréen']},
+      de: {name:'독일어', country:'Südkorea', first:'"zum ersten Mal"', trip:'Reise', travel:'reisen', vlog:'Vlog', busan:'Busan', daejeon:'Daejeon', food:'koreanisches Essen',
+        safety:'Südkorea Sicherheit Spaziergang', transit:'Seoul U-Bahn beeindruckend', technology:'koreanische Technologie beeindruckend', expert:'Gesangslehrer KPOP Reaktion',
+        samgyeopsal:['Samgyeopsal zum ersten Mal','koreanischer Schweinebauch probieren'], hanbok:['Hanbok zum ersten Mal','koreanische traditionelle Kleidung Erfahrung'], jjimjilbang:['Jjimjilbang zum ersten Mal','koreanische Sauna Erfahrung'], kimchi:['Kimchi zum ersten Mal','koreanisches Kimchi probieren']},
+      id: {name:'인도네시아어', country:'Korea Selatan', first:'pertama kali', trip:'liburan', travel:'wisata', vlog:'vlog', busan:'Busan', daejeon:'Daejeon', food:'makanan Korea',
+        safety:'Korea Selatan aman jalan jalan', transit:'kereta bawah tanah Seoul takjub', technology:'teknologi Korea luar biasa', expert:'pelatih vokal KPOP reaksi',
+        samgyeopsal:['samgyeopsal pertama kali','mencoba perut babi Korea'], hanbok:['hanbok pertama kali','pengalaman pakaian tradisional Korea'], jjimjilbang:['jjimjilbang pertama kali','pengalaman sauna Korea'], kimchi:['kimchi pertama kali','mencoba kimchi Korea']}
+    };
+
+    function sourcePresetQueries(topic, language) {
+      const lang = SEARCH_LANGUAGES[language] || SEARCH_LANGUAGES.en;
+      if (topic === 'travel') return [`${lang.country} ${lang.first}`];
+      if (topic === 'food') return [`${lang.food} ${lang.first}`];
+      if (topic === 'trip' || topic === 'travel_general' || topic === 'vlog') {
+        const word = topic === 'travel_general' ? lang.travel : lang[topic];
+        return [`${lang.country} ${word}`];
+      }
+      if (topic === 'busan' || topic === 'daejeon') return [`${lang[topic]} ${lang.vlog}`, `${lang[topic]} ${lang.trip}`];
+      if (topic === 'korean') return ['외국인 한국 첫 방문'];
+      const expressions = lang[topic];
+      return Array.isArray(expressions) ? [...expressions] : expressions ? [expressions] : [];
+    }
+
+    function updateSourcePresetPreview() {
+      const topic = document.getElementById('sourcePresetSelect').value;
+      const language = document.getElementById('sourceLanguageSelect').value;
+      document.getElementById('sourcePresetPreview').textContent = `적용할 검색어: ${sourcePresetQueries(topic, language).join(' | ')}`;
+    }
+
     const RECOMMENDED_KEYWORDS = [
       {
             "id": "source0",
@@ -601,6 +665,17 @@ python server.py</pre>
 ];
 
     // =========================================================================
+    RECOMMENDED_KEYWORDS.push(
+      {id:'trip', cat:'travel', label:'Korea trip', query:'Korea trip', desc:'한국 여행 원본'},
+      {id:'travel_general', cat:'travel', label:'Korea travel', query:'Korea travel', desc:'한국 여행기'},
+      {id:'vlog', cat:'travel', label:'Korea vlog', query:'Korea vlog', desc:'체험 브이로그'},
+      {id:'busan', cat:'travel', label:'Busan', query:'Busan vlog', desc:'부산 여행'},
+      {id:'daejeon', cat:'travel', label:'Daejeon', query:'Daejeon vlog', desc:'대전 여행'},
+      {id:'samgyeopsal', cat:'food', label:'Samgyeopsal', query:'samgyeopsal "first time"', desc:'삼겹살 첫 체험'},
+      {id:'hanbok', cat:'travel', label:'Hanbok', query:'hanbok "first time"', desc:'한복 체험'},
+      {id:'jjimjilbang', cat:'travel', label:'Jjimjilbang', query:'jjimjilbang "first time"', desc:'찜질방 체험'}
+    );
+
     // 2. 실전형 내장 해외 바이럴 영상 + 실제 타임스탬프 자막 데이터셋
     // (API 키 입력 전에도 필터링, 바이럴 배수 계산, 자막 추출, SRT 저장을 즉시 수행)
     // =========================================================================
@@ -1298,7 +1373,7 @@ python server.py</pre>
         `${video.channelTitle} (${video.country || '글로벌'}) · 조회수 ${formatNumber(video.viewCount)}회 · 구독자 대비 ${formatRatio(video.viralRatio)}배`;
       document.getElementById('studioYoutubeLink').href = `https://www.youtube.com/watch?v=${video.videoId}`;
 
-      if (video.language && ['en', 'ja', 'es', 'ko'].includes(video.language)) {
+      if (video.language && ['en', 'ja', 'es', 'ko', 'zh', 'fr', 'de', 'id'].includes(video.language)) {
         document.getElementById('subtitleLangSelect').value = video.language;
       }
 
@@ -1565,13 +1640,18 @@ python server.py</pre>
     // =========================================================================
     // Transparent heuristic: query match dominates; popularity cannot create an S grade by itself.
     const CONCEPTS = [
-      ['korea', 'korean', '한국', '한국어', '한식', '한국음식', '韓国', '韩国', 'corea', 'corée'],
+      ['korea', 'korean', '한국', '한국어', '한식', '한국음식', '韓国', '韩国', 'corea', 'coreana', 'coreano', 'corée', 'coréenne', 'coréen', 'südkorea', 'koreanisches', 'koreanischer', '韩式'],
       ['reaction', 'reactions', 'react', 'reacts', '반응', '해외반응', '리액션', '反応', 'reaksi'],
       ['food', 'foods', '음식', '한식', '한국음식', '먹방', '맛집', 'グルメ', '美食', 'makanan'],
-      ['travel', 'trip', '여행', '방문', '旅行', 'voyage', 'reise', 'viaje'],
+      ['travel', 'trip', '여행', '방문', '旅行', 'voyage', 'reise', 'viaje', 'viajar', 'voyager', 'reisen', 'liburan', 'wisata', '旅游'],
       ['foreigner', 'foreigners', '외국인', '해외'],
-      ['first', '처음', '첫', '初めて', 'primera'],
+      ['first', '처음', '첫', '初めて', 'primera', 'première', 'ersten', 'pertama', '第一次', '初体验'],
       ['seoul', '서울', 'ソウル', '首尔'],
+      ['busan', '부산', '釜山'], ['daejeon', '대전', 'テジョン'],
+      ['samgyeopsal', 'samgyupsal', '삼겹살', 'サムギョプサル', '五花肉', 'panceta', 'schweinebauch'],
+      ['hanbok', '한복', '韓服', '韩服', 'ハンボク'], ['jjimjilbang', '찜질방', 'チムジルバン', '汗蒸幕'],
+      ['kimchi', '김치', 'キムチ'],
+      ['vlog', '브이로그', 'ブイログ'],
       ['culture', '문화'], ['movie', 'cinema', '영화'], ['economy', '경제']
     ];
     function queryTokens(text) {
@@ -1594,14 +1674,14 @@ python server.py</pre>
       const title = (video.title || '').toLowerCase().normalize('NFKC');
       const description = (video.description || '').slice(0, 1500).toLowerCase().normalize('NFKC');
       const text = `${title} ${description}`;
-      const korea = /\b(?:south korea|korean?|seoul|busan|kimchi|ktx|k-pop|kpop|bts|blackpink)\b|한국|한식|서울|부산|김치|韓国|韩国|corea|corée/i;
+      const korea = /\b(?:south korea|korean?|seoul|busan|daejeon|samgyeopsal|samgyupsal|hanbok|jjimjilbang|kimchi|ktx|k-pop|kpop|bts|blackpink)\b|한국|한식|서울|부산|대전|삼겹살|한복|찜질방|김치|韓国|韓國|韩国|韩式|釜山|テジョン|サムギョプサル|韓服|韩服|ハンボク|チムジルバン|汗蒸幕|キムチ|corea|corée|coréen|südkorea|koreanisch/i;
       // North Korea alone is not evidence for the intended South Korea source topic.
       const withoutNorth = text.replace(/north korea(?:n)?|북한|dprk/gi, '');
       const koreaRelated = korea.test(withoutNorth);
-      const firstHand = /\bfirst time\b|\bmy first\b|\bwe tried\b|\bi tried\b|\btrying\b|\bour experience\b|\bwalking\b|\bvisit(?:ing)?\b|\bvocal coach\b|\bfilmmaker\b|처음|첫 방문|첫 체험|먹어본|먹어 봤|가봤|가 봤|직접 체험|탑승기|初めて|primera vez|première fois/;
-      const reaction = /\b(?:surprised|shocked|unexpected|amazing|impressed|incredible|delicious|beautiful|wow|safe|reaction|reacts)\b|\bcan't believe\b|놀라|놀랍|감탄|감동|맛있|대박|호평|극찬|최고|안전|驚|美味|すごい/;
-      const compilation = /reaction compilation|reactions compilation|comment compilation|foreign comments|해외댓글|댓글 모음|반응 모음|해외반응 모음|총정리|국뽕|전세계가 경악|세계가 경악|외신 번역/;
-      const negative = /\b(?:hate|hated|regret|disappointed|terrible|unsafe|overrated|worst)\b|\bnot (?:impressed|safe|amazing|good)\b|실망|최악|혐오|후회|안전하지|맛없/;
+      const firstHand = /\bfirst time\b|\bmy first\b|\bwe tried\b|\bi tried\b|\btrying\b|\bour experience\b|\bwalking\b|\bvisit(?:ing)?\b|\bvocal coach\b|\bfilmmaker\b|처음|첫 방문|첫 체험|먹어본|먹어 봤|가봤|가 봤|직접 체험|탑승기|初めて|primera vez|première fois|zum ersten mal|pertama kali|第一次|初体验|食べてみた|体験|\bvlog\b|브이로그/;
+      const reaction = /\b(?:surprised|shocked|unexpected|amazing|impressed|incredible|delicious|beautiful|wow|safe|reaction|reacts)\b|\bcan't believe\b|놀라|놀랍|감탄|감동|맛있|대박|호평|극찬|최고|안전|驚|美味|すごい|感動|最高|惊讶|惊艳|好吃|太棒|震撼|increíble|delicioso|sorprend|encanta|incroyable|délicieux|surpris|adoré|unglaublich|lecker|beeindruck|überrascht|luar biasa|enak|terkejut|takjub/;
+      const compilation = /reaction compilation|reactions compilation|comment compilation|foreign comments|해외댓글|댓글 모음|반응 모음|해외반응 모음|총정리|국뽕|전세계가 경악|세계가 경악|외신 번역|recopilación|compilation|zusammenschnitt|kompilasi|反应合集|反応まとめ/;
+      const negative = /\b(?:hate|hated|regret|disappointed|terrible|unsafe|overrated|worst)\b|\bnot (?:impressed|safe|amazing|good)\b|실망|최악|혐오|후회|안전하지|맛없|decepcion|déçu|enttäusch|mengecewakan|失望|不推荐|美味しくない/;
       const sourceEvidence = firstHand.test(title) ? 1 : firstHand.test(description) ? 0.5 : 0;
       const reactionEvidence = reaction.test(title) ? 1 : reaction.test(description) ? 0.5 : 0;
       const repackaged = compilation.test(title);
@@ -2008,14 +2088,22 @@ python server.py</pre>
         if (id && /^[a-f0-9]{32}$/.test(id)) pollAutomation(id);
         else document.getElementById('automationStatus').textContent = '저장된 작업이 없습니다.';
       });
-      document.getElementById('applySourcePresetBtn').addEventListener('click', () => {
-        const presets = {travel: 'Korea "first time"', food: '"Korean food" "first time"', safety: 'Korea "safe" walking', transit: 'Seoul subway impressed', technology: 'Korean technology impressed', korean: '외국인 한국 첫 방문', expert: '"vocal coach" "K-pop" reaction'};
-        const query = presets[document.getElementById('sourcePresetSelect').value];
-        state.selectedKeywords = new Set([query]);
+      const applyPreset = append => {
+        const translated = sourcePresetQueries(document.getElementById('sourcePresetSelect').value, document.getElementById('sourceLanguageSelect').value);
+        const existing = append ? document.getElementById('searchQueryInput').value.split(/[|,]/).map(q => q.trim()).filter(Boolean) : [];
+        const queries = new Set([...existing, ...translated]);
+        if (queries.size > 10) { showToast('검색어는 최대 10개입니다. 기존 검색어를 줄이거나 교체하세요.', 'warn'); return; }
+        state.selectedKeywords = queries;
         syncSearchInputWithSelectedKeywords();
         renderKeywordChips();
-        showToast('검색어를 교체했습니다. 발굴 버튼으로 조회하세요.', 'info');
+        showToast('검색어를 적용했습니다. 발굴 버튼으로 조회하세요.', 'info');
+      };
+      document.getElementById('applySourcePresetBtn').addEventListener('click', () => applyPreset(false));
+      document.getElementById('addSourcePresetBtn').addEventListener('click', () => applyPreset(true));
+      ['sourcePresetSelect', 'sourceLanguageSelect'].forEach(id => {
+        document.getElementById(id).addEventListener('change', updateSourcePresetPreview);
       });
+      updateSourcePresetPreview();
       // 저장된 API 키 복원
       const apiKeyInput = document.getElementById('apiKeyInput');
       if (state.apiKey) apiKeyInput.value = state.apiKey;
